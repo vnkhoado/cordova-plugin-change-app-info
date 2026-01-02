@@ -31,6 +31,7 @@ public class CSSInjector extends CordovaPlugin {
     private String backgroundColor = null;
     private boolean initialInjectionDone = false;
     private boolean isInjecting = false;
+    private int resumeCount = 0;
 
     @Override
     public void pluginInitialize() {
@@ -134,15 +135,18 @@ public class CSSInjector extends CordovaPlugin {
     public void onResume(boolean multitasking) {
         super.onResume(multitasking);
         
+        resumeCount++;
+        
         // Only inject on first resume
         if (!initialInjectionDone) {
+            android.util.Log.d(TAG, "onResume #" + resumeCount + " (multitasking=" + multitasking + ") - WILL inject (first time)");
             handler.postDelayed(() -> {
                 injectAllContent();
                 initialInjectionDone = true;
             }, 200);
+        } else {
+            android.util.Log.d(TAG, "onResume #" + resumeCount + " (multitasking=" + multitasking + ") - skipped (already injected)");
         }
-        
-        android.util.Log.d(TAG, "onResume");
     }
 
     /**
