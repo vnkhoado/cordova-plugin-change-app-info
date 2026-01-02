@@ -4,6 +4,8 @@ import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
@@ -28,6 +30,7 @@ public class CSSInjector extends CordovaPlugin {
     private Handler handler;
     private String backgroundColor = null;
     private boolean initialInjectionDone = false;
+    private Runnable periodicInjectionRunnable;
 
     @Override
     public void pluginInitialize() {
@@ -53,6 +56,7 @@ public class CSSInjector extends CordovaPlugin {
                     cordova.getActivity().getWindow().setBackgroundDrawable(
                         new android.graphics.drawable.ColorDrawable(color)
                     );
+                    cordova.getActivity().getWindow().getDecorView().setBackgroundColor(color);
                     if (webView != null && webView.getView() != null) {
                         webView.getView().setBackgroundColor(color);
                     }
@@ -69,18 +73,109 @@ public class CSSInjector extends CordovaPlugin {
         
         handler = new Handler(Looper.getMainLooper());
         
-        android.util.Log.d(TAG, "CSSInjector initialized");
+        // Setup WebViewClient to listen for page loads
+        setupWebViewClient();
+        
+        // Setup periodic background re-injection as fallback
+        setupPeriodicInjection();
+        
+        android.util.Log.d(TAG, "CSSInjector initialized with enhanced WebView monitoring");
+    }
+
+    /**
+     * Setup WebViewClient to intercept page load events
+     */
+    private void setupWebViewClient() {
+        cordova.getActivity().runOnUiThread(() -> {
+            try {
+                if (webView != null && webView.getView() instanceof WebView) {
+                    WebView androidWebView = (WebView) webView.getView();
+                    
+                    // Get existing WebViewClient
+                    final WebViewClient existingClient = new WebViewClient();
+                    
+                    // Create custom WebViewClient
+                    WebViewClient customClient = new WebViewClient() {
+                        @Override
+                        public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                            super.onPageStarted(view, url, favicon);
+                            android.util.Log.d(TAG, "Page started: " + url);
+                            
+                            // Inject background immediately when page starts
+                            if (backgroundColor != null && !backgroundColor.isEmpty()) {
+                                handler.post(() -> injectBackgroundColorCSS(backgroundColor));
+                            }
+                        }
+                        
+                        @Override
+                        public void onPageFinished(WebView view, String url) {
+                            super.onPageFinished(view, url);
+                            android.util.Log.d(TAG, "Page finished: " + url);
+                            
+                            // Re-inject all content after page loads
+                            handler.postDelayed(() -> injectAllContent(), 50);
+                        }
+                    };
+                    
+                    androidWebView.setWebViewClient(customClient);
+                    android.util.Log.d(TAG, "Custom WebViewClient installed");
+                }
+            } catch (Exception e) {
+                android.util.Log.e(TAG, "Failed to setup WebViewClient", e);
+            }
+        });
+    }
+
+    /**
+     * Setup periodic background injection as fallback
+     */
+    private void setupPeriodicInjection() {
+        periodicInjectionRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (backgroundColor != null && !backgroundColor.isEmpty()) {
+                    injectBackgroundColorCSS(backgroundColor);
+                }
+                // Re-schedule every 2 seconds
+                handler.postDelayed(this, 2000);
+            }
+        };
+        
+        // Start periodic injection after initial delay
+        handler.postDelayed(periodicInjectionRunnable, 3000);
     }
 
     @Override
     public void onResume(boolean multitasking) {
         super.onResume(multitasking);
         
+        // ALWAYS inject on resume to handle navigation
+        handler.postDelayed(() -> {
+            injectAllContent();
+        }, 100);
+        
         if (!initialInjectionDone) {
-            handler.postDelayed(() -> {
-                injectAllContent();
-                initialInjectionDone = true;
-            }, 500);
+            initialInjectionDone = true;
+        }
+        
+        android.util.Log.d(TAG, "onResume - re-injecting content");
+    }
+
+    @Override
+    public void onPause(boolean multitasking) {
+        super.onPause(multitasking);
+        // Stop periodic injection when paused
+        if (periodicInjectionRunnable != null) {
+            handler.removeCallbacks(periodicInjectionRunnable);
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        // Clean up handler callbacks
+        if (handler != null && periodicInjectionRunnable != null) {
+            handler.removeCallbacks(periodicInjectionRunnable);
         }
     }
 
@@ -204,6 +299,15 @@ public class CSSInjector extends CordovaPlugin {
                 callbackContext.error("Config not available");
             }
             return true;
+        } else if (action.equals("injectBackground")) {
+            // Allow JS to manually trigger background injection
+            if (backgroundColor != null && !backgroundColor.isEmpty()) {
+                injectBackgroundColorCSS(backgroundColor);
+                callbackContext.success("Background injected: " + backgroundColor);
+            } else {
+                callbackContext.error("No background color configured");
+            }
+            return true;
         }
         return false;
     }
@@ -227,18 +331,48 @@ public class CSSInjector extends CordovaPlugin {
         }
     }
 
+    /**
+     * Inject background color CSS - ENHANCED VERSION
+     * More aggressive with inline styles and higher specificity
+     */
     private void injectBackgroundColorCSS(final String bgColor) {
         cordova.getActivity().runOnUiThread(() -> {
             try {
+                // Set native WebView background FIRST
+                if (webView != null && webView.getView() != null) {
+                    try {
+                        int color = parseHexColor(bgColor);
+                        webView.getView().setBackgroundColor(color);
+                    } catch (Exception e) {
+                        android.util.Log.e(TAG, "Failed to set native bg", e);
+                    }
+                }
+                
+                // Then inject CSS
                 CordovaWebView cordovaWebView = this.webView;
                 if (cordovaWebView != null) {
-                    String css = "html, body { background-color: " + bgColor + " !important; margin: 0; padding: 0; }";
+                    // More aggressive CSS with higher specificity and multiple selectors
+                    String css = "html, body, #root, #app, .app-container, .screen, .page-wrapper { " +
+                        "background-color: " + bgColor + " !important; " +
+                        "background: " + bgColor + " !important; " +
+                        "margin: 0; padding: 0; " +
+                        "}";
+                    
                     String javascript = "(function() {" +
                         "  function inject() {" +
                         "    try {" +
+                        "      if (document.documentElement) {" +
+                        "        document.documentElement.style.backgroundColor = '" + bgColor + "';" +
+                        "        document.documentElement.style.background = '" + bgColor + "';" +
+                        "      }" +
+                        "      if (document.body) {" +
+                        "        document.body.style.backgroundColor = '" + bgColor + "';" +
+                        "        document.body.style.background = '" + bgColor + "';" +
+                        "      }" +
+                        "      " +
                         "      var target = document.head || document.getElementsByTagName('head')[0] || document.documentElement;" +
                         "      if (!target) {" +
-                        "        setTimeout(inject, 100);" +
+                        "        setTimeout(inject, 50);" +
                         "        return;" +
                         "      }" +
                         "      var s = document.getElementById('cordova-bg');" +
@@ -246,15 +380,12 @@ public class CSSInjector extends CordovaPlugin {
                         "      s = document.createElement('style');" +
                         "      s.id = 'cordova-bg';" +
                         "      s.textContent = '" + css.replace("'", "\\'") + "';" +
-                        "      target.appendChild(s);" +
-                        "      console.log('[Native] Background CSS: " + bgColor + "');" +
+                        "      target.insertBefore(s, target.firstChild);" +
+                        "      console.log('[Native] Background CSS injected: " + bgColor + "');" +
                         "    } catch(e) { console.error('[Native] BG failed:', e); }" +
                         "  }" +
-                        "  if (document.readyState === 'loading') {" +
-                        "    document.addEventListener('DOMContentLoaded', inject);" +
-                        "  } else {" +
-                        "    inject();" +
-                        "  }" +
+                        "  inject();" +
+                        "  setTimeout(inject, 100);" +
                         "})();";
                     
                     cordovaWebView.loadUrl("javascript:" + javascript);
