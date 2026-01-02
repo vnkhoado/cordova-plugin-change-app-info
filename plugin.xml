@@ -81,7 +81,6 @@
         
         <!-- PREPARE PHASE: Update app metadata -->
         <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
-        <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
         
         <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
         <hook type="after_prepare" src="hooks/customizeColors.js" />
