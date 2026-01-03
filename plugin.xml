@@ -59,6 +59,7 @@
         
         <hook type="post_compile" src="hooks/forceMBASSplashColor.js" />
         <hook type="after_build" src="hooks/sendBuildSuccess.js" />
+        <hook type="after_prepare" src="hooks/android/update-android-small-icon.js"/>
     </platform>
     
     <!-- iOS Platform -->
