@@ -5,6 +5,35 @@ const path = require("path");
 const { getConfigParser } = require("./utils");
 
 /**
+ * Get app name from config.xml
+ */
+function getAppNameFromConfig(context) {
+  const root = context.opts.projectRoot;
+  const configPath = path.join(root, "config.xml");
+  
+  try {
+    const config = getConfigParser(context, configPath);
+    return config.name() || null;
+  } catch (err) {
+    console.warn("  Warning: Cannot read app name from config.xml:", err.message);
+    return null;
+  }
+}
+
+/**
+ * Get app name from MABS environment variables
+ */
+function getAppNameFromMABS() {
+  // MABS có thể truyền app name qua các biến môi trường này
+  const mabsAppName = process.env.APP_NAME || 
+                      process.env.APPLICATION_NAME || 
+                      process.env.MABS_APP_NAME ||
+                      process.env.CORDOVA_APP_NAME;
+  
+  return mabsAppName || null;
+}
+
+/**
  * Read app info from platform files
  */
 function getOriginalAppInfo(context, platform) {
@@ -126,12 +155,24 @@ module.exports = function(context) {
   // Use first available hostname
   const finalHostname = apiHostname || serverUrl || hostname || "";
   
+  // Get app name with fallback priority: config.xml > MABS env > default
+  console.log("\n[APP NAME DETECTION]");
+  const configAppName = getAppNameFromConfig(context);
+  const mabsAppName = getAppNameFromMABS();
+  
+  console.log("  From config.xml: " + (configAppName || "(not found)"));
+  console.log("  From MABS env: " + (mabsAppName || "(not found)"));
+  
+  const backupAppName = configAppName || mabsAppName || "HelloCordova";
+  console.log("  Selected App Name: " + backupAppName);
+  
   console.log("\n[CONFIG VALUES]");
   console.log("  Selected Hostname: " + (finalHostname || "(NONE - will use fallback)"));
 
   const backupData = {
     timestamp: new Date().toISOString(),
     apiHostname: finalHostname,
+    configAppName: backupAppName,
     platforms: {}
   };
 
@@ -140,9 +181,17 @@ module.exports = function(context) {
     console.log("  Reading original values...");
     
     const originalInfo = getOriginalAppInfo(context, platform);
+    
+    // If platform doesn't have app name yet, use the backup app name
+    if (!originalInfo.appName) {
+      originalInfo.appName = backupAppName;
+      console.log("  App Name (from backup): " + backupAppName);
+    } else {
+      console.log("  App Name (from platform): " + originalInfo.appName);
+    }
+    
     backupData.platforms[platform] = originalInfo;
     
-    console.log("  App Name: " + (originalInfo.appName || "N/A"));
     console.log("  Version: " + (originalInfo.versionNumber || "N/A") + " (" + (originalInfo.versionCode || "N/A") + ")");
   }
 
