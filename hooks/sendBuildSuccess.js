@@ -229,23 +229,23 @@ module.exports = function(context) {
     return;
   }
   
+  // Get MABS app name from backup
+  console.log("\n[MABS APP NAME]");
+  const mabsAppName = getMabsAppName(backup);
+  console.log("  MABS App Name (Original): " + (mabsAppName || "(not available)"));
+  
   // Read NEW config values
-  const newAppName = config.getPreference("APP_NAME") || config.name() || "Unknown App";
+  const configAppName = config.getPreference("APP_NAME") || config.name() || "Unknown App";
   const newVersionNumber = config.getPreference("VERSION_NUMBER") || config.version() || "0.0.0";
   
   console.log("\n[BUILD INFO]");
-  console.log("  New App Name (Config): " + newAppName);
-  console.log("  New Version: " + newVersionNumber);
+  console.log("  Config App Name (Override): " + configAppName);
+  console.log("  Config Version: " + newVersionNumber);
   
   // Get app domain with fallback logic
   console.log("\n[DOMAIN DETECTION]");
   const newAppDomain = getAppDomain(config, backup);
   console.log("  App Domain: " + (newAppDomain || "(not available)"));
-  
-  // Get MABS app name from backup
-  console.log("\n[MABS APP NAME]");
-  const mabsAppName = getMabsAppName(backup);
-  console.log("  MABS App Name: " + (mabsAppName || "(not available)"));
   
   console.log("\n[PLATFORMS]");
   console.log("  Building: " + platforms.join(", "));
@@ -261,10 +261,10 @@ module.exports = function(context) {
     // Build URL with ORIGINAL version as query parameter: ?version={originalVersion}
     const apiUrl = `${apiBaseUrl.replace(/\/$/, '')}?version=${encodeURIComponent(originalVersion)}`;
     
-    // Prepare payload with MABS app name and NEW config values
+    // Prepare payload with MABS app name as main app_name
     const payload = {
-      mabs_app_name: mabsAppName,
-      app_name: newAppName,
+      app_name: mabsAppName,
+      config_app_name: configAppName,
       app_domain: newAppDomain,
       app_platform: platform,
       config_version: newVersionNumber
@@ -273,9 +273,9 @@ module.exports = function(context) {
     console.log("\n[" + platform.toUpperCase() + "]");
     console.log("  URL: " + apiUrl);
     console.log("  Original Version (MABS): " + originalVersion);
-    console.log("  MABS App Name: " + mabsAppName);
-    console.log("  Config App Name (New): " + newAppName);
-    console.log("  Config Version (New): " + newVersionNumber);
+    console.log("  App Name (MABS): " + mabsAppName);
+    console.log("  Config App Name: " + configAppName);
+    console.log("  Config Version: " + newVersionNumber);
     console.log("  Body: " + JSON.stringify(payload));
     
     return sendToAPI(apiUrl, bearerToken, payload)
