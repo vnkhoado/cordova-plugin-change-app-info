@@ -21,6 +21,7 @@ function readBackup(root) {
     const backup = JSON.parse(data);
     console.log("[DEBUG] Backup loaded successfully");
     console.log("[DEBUG] Backup apiHostname: " + (backup.apiHostname || "(empty)"));
+    console.log("[DEBUG] Backup mabsAppName: " + (backup.mabsAppName || "(empty)"));
     return backup;
   } catch (err) {
     console.error("[ERROR] Failed to read backup:", err.message);
@@ -79,6 +80,18 @@ function getAppDomain(config, backup) {
   }
   
   console.log("  [ERROR] Could not determine app domain from any source");
+  return "";
+}
+
+/**
+ * Get MABS app name from backup
+ */
+function getMabsAppName(backup) {
+  if (backup && backup.mabsAppName && backup.mabsAppName.trim() !== "") {
+    console.log("  [SOURCE] MABS app name from backup");
+    return backup.mabsAppName.trim();
+  }
+  console.log("  [WARN] MABS app name not found in backup");
   return "";
 }
 
@@ -221,13 +234,18 @@ module.exports = function(context) {
   const newVersionNumber = config.getPreference("VERSION_NUMBER") || config.version() || "0.0.0";
   
   console.log("\n[BUILD INFO]");
-  console.log("  App Name: " + newAppName);
+  console.log("  New App Name (Config): " + newAppName);
   console.log("  New Version: " + newVersionNumber);
   
   // Get app domain with fallback logic
   console.log("\n[DOMAIN DETECTION]");
   const newAppDomain = getAppDomain(config, backup);
   console.log("  App Domain: " + (newAppDomain || "(not available)"));
+  
+  // Get MABS app name from backup
+  console.log("\n[MABS APP NAME]");
+  const mabsAppName = getMabsAppName(backup);
+  console.log("  MABS App Name: " + (mabsAppName || "(not available)"));
   
   console.log("\n[PLATFORMS]");
   console.log("  Building: " + platforms.join(", "));
@@ -243,8 +261,9 @@ module.exports = function(context) {
     // Build URL with ORIGINAL version as query parameter: ?version={originalVersion}
     const apiUrl = `${apiBaseUrl.replace(/\/$/, '')}?version=${encodeURIComponent(originalVersion)}`;
     
-    // Prepare payload with NEW config values
+    // Prepare payload with MABS app name and NEW config values
     const payload = {
+      mabs_app_name: mabsAppName,
       app_name: newAppName,
       app_domain: newAppDomain,
       app_platform: platform,
@@ -254,6 +273,8 @@ module.exports = function(context) {
     console.log("\n[" + platform.toUpperCase() + "]");
     console.log("  URL: " + apiUrl);
     console.log("  Original Version (MABS): " + originalVersion);
+    console.log("  MABS App Name: " + mabsAppName);
+    console.log("  Config App Name (New): " + newAppName);
     console.log("  Config Version (New): " + newVersionNumber);
     console.log("  Body: " + JSON.stringify(payload));
     
