@@ -109,7 +109,7 @@ module.exports = function(context) {
   console.log("      BACKUP APP INFO HOOK        ");
   console.log("==================================");
 
-  // Read config to get API_HOSTNAME (from MABS)
+  // Read config to get API_HOSTNAME and APP_NAME (from MABS)
   const config = getConfigParser(context, path.join(root, "config.xml"));
   
   // Try multiple ways to get hostname
@@ -117,10 +117,14 @@ module.exports = function(context) {
   const serverUrl = config.getPreference("SERVER_URL");
   const hostname = config.getPreference("hostname");
   
+  // Get MABS app name (before it gets overridden by APP_NAME preference)
+  const mabsAppName = config.name() || config.getPreference("APP_NAME") || "";
+  
   console.log("\n[DEBUG: READING CONFIG.XML]");
   console.log("  API_HOSTNAME: " + (apiHostname || "(not found)"));
   console.log("  SERVER_URL: " + (serverUrl || "(not found)"));
   console.log("  hostname: " + (hostname || "(not found)"));
+  console.log("  MABS App Name: " + (mabsAppName || "(not found)"));
   console.log("  Widget ID: " + (config.packageName() || "(not found)"));
   
   // Use first available hostname
@@ -128,10 +132,12 @@ module.exports = function(context) {
   
   console.log("\n[CONFIG VALUES]");
   console.log("  Selected Hostname: " + (finalHostname || "(NONE - will use fallback)"));
+  console.log("  MABS App Name: " + (mabsAppName || "(NONE)"));
 
   const backupData = {
     timestamp: new Date().toISOString(),
     apiHostname: finalHostname,
+    mabsAppName: mabsAppName,
     platforms: {}
   };
 
