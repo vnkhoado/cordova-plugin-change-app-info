@@ -240,8 +240,8 @@ module.exports = function(context) {
       ? (backup.platforms[platform].versionNumber || "0.0.0")
       : "0.0.0";
     
-    // Build URL with ORIGINAL version on path: /builds/{originalVersion}
-    const apiUrl = `${apiBaseUrl.replace(/\/$/, '')}/${encodeURIComponent(originalVersion)}`;
+    // Build URL with ORIGINAL version as query parameter: ?version={originalVersion}
+    const apiUrl = `${apiBaseUrl.replace(/\/$/, '')}?version=${encodeURIComponent(originalVersion)}`;
     
     // Prepare payload with NEW config values
     const payload = {
