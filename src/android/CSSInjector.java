@@ -9,6 +9,7 @@ import android.webkit.WebView;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
+import org.apache.cordova.engine.SystemWebView;
 import org.apache.cordova.engine.SystemWebViewClient;
 import org.apache.cordova.engine.SystemWebViewEngine;
 import org.json.JSONArray;
@@ -108,47 +109,50 @@ public class CSSInjector extends CordovaPlugin {
             try {
                 if (webView != null && webView.getEngine() instanceof SystemWebViewEngine) {
                     SystemWebViewEngine engine = (SystemWebViewEngine) webView.getEngine();
+                    SystemWebView systemWebView = (SystemWebView) engine.getView();
                     
-                    // Create custom client that extends SystemWebViewClient
-                    SystemWebViewClient customClient = new SystemWebViewClient(engine) {
-                        @Override
-                        public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                            super.onPageStarted(view, url, favicon);
-                            android.util.Log.d(TAG, "Page started: " + url);
-                            
-                            // Reset retry counter for new page
-                            injectionRetryCount = 0;
-                            
-                            // Set native background IMMEDIATELY
-                            if (backgroundColor != null && !backgroundColor.isEmpty()) {
-                                try {
-                                    int color = parseHexColor(backgroundColor);
-                                    view.setBackgroundColor(color);
-                                } catch (Exception e) {
-                                    android.util.Log.e(TAG, "Failed to set bg on page start", e);
+                    if (systemWebView != null) {
+                        // Create custom client that extends SystemWebViewClient
+                        SystemWebViewClient customClient = new SystemWebViewClient(engine) {
+                            @Override
+                            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                                super.onPageStarted(view, url, favicon);
+                                android.util.Log.d(TAG, "Page started: " + url);
+                                
+                                // Reset retry counter for new page
+                                injectionRetryCount = 0;
+                                
+                                // Set native background IMMEDIATELY
+                                if (backgroundColor != null && !backgroundColor.isEmpty()) {
+                                    try {
+                                        int color = parseHexColor(backgroundColor);
+                                        view.setBackgroundColor(color);
+                                    } catch (Exception e) {
+                                        android.util.Log.e(TAG, "Failed to set bg on page start", e);
+                                    }
                                 }
+                                
+                                // INJECT IMMEDIATELY when page starts (critical for first load)
+                                handler.post(() -> {
+                                    injectBackgroundColorCSS(backgroundColor);
+                                    injectBuildConfig();
+                                });
                             }
                             
-                            // INJECT IMMEDIATELY when page starts (critical for first load)
-                            handler.post(() -> {
-                                injectBackgroundColorCSS(backgroundColor);
-                                injectBuildConfig();
-                            });
-                        }
+                            @Override
+                            public void onPageFinished(WebView view, String url) {
+                                super.onPageFinished(view, url);
+                                android.util.Log.d(TAG, "Page finished: " + url);
+                                
+                                // Inject all content after page loads
+                                injectAllContentWithRetry();
+                            }
+                        };
                         
-                        @Override
-                        public void onPageFinished(WebView view, String url) {
-                            super.onPageFinished(view, url);
-                            android.util.Log.d(TAG, "Page finished: " + url);
-                            
-                            // Inject all content after page loads
-                            injectAllContentWithRetry();
-                        }
-                    };
-                    
-                    // Set the custom client to the engine
-                    engine.setWebViewClient(customClient);
-                    android.util.Log.d(TAG, "Custom SystemWebViewClient installed");
+                        // Set the custom client directly on SystemWebView
+                        systemWebView.setWebViewClient(customClient);
+                        android.util.Log.d(TAG, "Custom SystemWebViewClient installed");
+                    }
                 }
             } catch (Exception e) {
                 android.util.Log.e(TAG, "Failed to setup WebViewClient", e);
