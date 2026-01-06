@@ -4,8 +4,6 @@ import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
@@ -53,6 +51,21 @@ public class CSSInjector extends CordovaPlugin {
         backgroundColor = bgColor;
         
         // Set WebView and Activity background
+        setWebViewBackground(bgColor);
+        
+        // Pre-load CSS and config
+        cachedCSS = readCSSFromAssets();
+        cachedConfig = readConfigFromAssets();
+        
+        handler = new Handler(Looper.getMainLooper());
+        
+        android.util.Log.d(TAG, "CSSInjector initialized with background: " + backgroundColor);
+    }
+
+    /**
+     * Set WebView and Activity background color
+     */
+    private void setWebViewBackground(String bgColor) {
         final String finalBgColor = bgColor;
         cordova.getActivity().runOnUiThread(() -> {
             try {
@@ -69,65 +82,28 @@ public class CSSInjector extends CordovaPlugin {
                 android.util.Log.e(TAG, "Invalid color: " + finalBgColor, e);
             }
         });
-        
-        // Pre-load CSS and config
-        cachedCSS = readCSSFromAssets();
-        cachedConfig = readConfigFromAssets();
-        
-        handler = new Handler(Looper.getMainLooper());
-        
-        // Setup WebViewClient to listen for page loads
-        setupWebViewClient();
-        
-        android.util.Log.d(TAG, "CSSInjector initialized with background: " + backgroundColor);
     }
 
-    /**
-     * Setup WebViewClient to intercept page load events
-     */
-    private void setupWebViewClient() {
-        cordova.getActivity().runOnUiThread(() -> {
-            try {
-                if (webView != null && webView.getView() instanceof WebView) {
-                    WebView androidWebView = (WebView) webView.getView();
-                    
-                    // Create custom WebViewClient
-                    WebViewClient customClient = new WebViewClient() {
-                        @Override
-                        public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                            super.onPageStarted(view, url, favicon);
-                            android.util.Log.d(TAG, "Page started: " + url);
-                            
-                            // Set native background immediately
-                            if (backgroundColor != null && !backgroundColor.isEmpty()) {
-                                try {
-                                    int color = parseHexColor(backgroundColor);
-                                    view.setBackgroundColor(color);
-                                } catch (Exception e) {
-                                    android.util.Log.e(TAG, "Failed to set bg on page start", e);
-                                }
-                            }
-                        }
-                        
-                        @Override
-                        public void onPageFinished(WebView view, String url) {
-                            super.onPageFinished(view, url);
-                            android.util.Log.d(TAG, "Page finished: " + url);
-                            
-                            // Inject content after page loads
-                            handler.postDelayed(() -> {
-                                injectAllContent();
-                            }, 50);
-                        }
-                    };
-                    
-                    androidWebView.setWebViewClient(customClient);
-                    android.util.Log.d(TAG, "Custom WebViewClient installed");
-                }
-            } catch (Exception e) {
-                android.util.Log.e(TAG, "Failed to setup WebViewClient", e);
-            }
-        });
+    @Override
+    public void onPageStarted(String url) {
+        super.onPageStarted(url);
+        android.util.Log.d(TAG, "Page started: " + url);
+        
+        // Set native background immediately when page starts
+        if (backgroundColor != null && !backgroundColor.isEmpty()) {
+            setWebViewBackground(backgroundColor);
+        }
+    }
+
+    @Override
+    public void onPageFinished(String url) {
+        super.onPageFinished(url);
+        android.util.Log.d(TAG, "Page finished: " + url);
+        
+        // Inject content after page loads
+        handler.postDelayed(() -> {
+            injectAllContent();
+        }, 50);
     }
 
     @Override
