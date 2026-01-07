@@ -64,6 +64,9 @@
     
     <!-- iOS Platform -->
     <platform name="ios">
+        <!-- Swift Support Dependency (REQUIRED for CSSInjector.swift) -->
+        <dependency id="cordova-plugin-add-swift-support" version="2.0.2"/>
+        
         <!-- Native CSS Injector & Config Injector -->
         <config-file target="config.xml" parent="/*">
             <feature name="CSSInjector">
@@ -72,7 +75,11 @@
             </feature>
         </config-file>
         
+        <!-- Swift source file -->
         <source-file src="src/ios/CSSInjector.swift" />
+        
+        <!-- Framework dependencies -->
+        <framework src="WebKit.framework" />
         
         <!-- CLEANUP PHASE: Prepare and backup configs -->
         <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
