@@ -5,10 +5,13 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.webkit.WebView;
-import android.webkit.WebViewClient;
+
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
+import org.apache.cordova.engine.SystemWebView;
+import org.apache.cordova.engine.SystemWebViewClient;
+import org.apache.cordova.engine.SystemWebViewEngine;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -85,19 +88,23 @@ public class CSSInjector extends CordovaPlugin {
     /**
      * Setup WebViewClient to intercept page load events
      */
+
     private void setupWebViewClient() {
         cordova.getActivity().runOnUiThread(() -> {
             try {
-                if (webView != null && webView.getView() instanceof WebView) {
-                    WebView androidWebView = (WebView) webView.getView();
-                    
-                    // Create custom WebViewClient
-                    WebViewClient customClient = new WebViewClient() {
+                if (webView != null && webView.getView() instanceof SystemWebView) {
+                    SystemWebView systemWebView = (SystemWebView) webView.getView();
+
+                    // Get the engine
+                    SystemWebViewEngine engine = (SystemWebViewEngine) webView.getEngine();
+
+                    // Create custom SystemWebViewClient
+                    SystemWebViewClient customClient = new SystemWebViewClient(engine) {
                         @Override
                         public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                             super.onPageStarted(view, url, favicon);
                             android.util.Log.d(TAG, "Page started: " + url);
-                            
+
                             // Set native background immediately
                             if (backgroundColor != null && !backgroundColor.isEmpty()) {
                                 try {
@@ -108,27 +115,28 @@ public class CSSInjector extends CordovaPlugin {
                                 }
                             }
                         }
-                        
+
                         @Override
                         public void onPageFinished(WebView view, String url) {
                             super.onPageFinished(view, url);
                             android.util.Log.d(TAG, "Page finished: " + url);
-                            
+
                             // Inject content after page loads
                             handler.postDelayed(() -> {
                                 injectAllContent();
                             }, 50);
                         }
                     };
-                    
-                    androidWebView.setWebViewClient(customClient);
-                    android.util.Log.d(TAG, "Custom WebViewClient installed");
+
+                    systemWebView.setWebViewClient(customClient);
+                    android.util.Log.d(TAG, "Custom SystemWebViewClient installed");
                 }
             } catch (Exception e) {
                 android.util.Log.e(TAG, "Failed to setup WebViewClient", e);
             }
         });
     }
+
 
     @Override
     public void onResume(boolean multitasking) {
