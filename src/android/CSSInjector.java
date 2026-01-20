@@ -41,10 +41,13 @@ public class CSSInjector extends CordovaPlugin {
     private boolean isFirstPageLoad = true;
     private String configScript = null;
     private String cssInlineScript = null;
+    private boolean webViewClientInstalled = false;
 
     @Override
     public void pluginInitialize() {
         super.pluginInitialize();
+        
+        android.util.Log.d(TAG, "=== CSSInjector pluginInitialize START ===");
         
         // Read WEBVIEW_BACKGROUND_COLOR from preferences
         String bgColor = preferences.getString("WEBVIEW_BACKGROUND_COLOR", null);
@@ -61,6 +64,7 @@ public class CSSInjector extends CordovaPlugin {
         }
         
         backgroundColor = bgColor;
+        android.util.Log.d(TAG, "Background color: " + backgroundColor);
         
         // Set WebView and Activity background
         final String finalBgColor = bgColor;
@@ -81,8 +85,21 @@ public class CSSInjector extends CordovaPlugin {
         });
         
         // Pre-load CSS and config
+        android.util.Log.d(TAG, "Reading CSS and config from assets...");
         cachedCSS = readCSSFromAssets();
         cachedConfig = readConfigFromAssets();
+        
+        if (cachedCSS != null) {
+            android.util.Log.d(TAG, "CSS loaded: " + cachedCSS.length() + " bytes");
+        } else {
+            android.util.Log.e(TAG, "CSS NOT loaded - file missing or error");
+        }
+        
+        if (cachedConfig != null) {
+            android.util.Log.d(TAG, "Config loaded: " + cachedConfig.toString());
+        } else {
+            android.util.Log.e(TAG, "Config NOT loaded - file missing or error");
+        }
         
         // Pre-build inline scripts for HTML injection
         buildConfigScript();
@@ -90,17 +107,175 @@ public class CSSInjector extends CordovaPlugin {
         
         handler = new Handler(Looper.getMainLooper());
         
-        // Setup WebViewClient FIRST to intercept early page loads
-        setupWebViewClient();
+        // CRITICAL: Setup WebViewClient IMMEDIATELY, before any page loads
+        // This must happen synchronously to ensure we intercept the very first request
+        setupWebViewClientNow();
         
-        // FIX: Inject immediately without delay to ensure CSS is ready before page loads
-        cordova.getActivity().runOnUiThread(() -> {
-            android.util.Log.d(TAG, "Immediate early injection");
-            injectBackgroundColorCSS(backgroundColor);
-            injectCSSIntoWebView();
-        });
-        
-        android.util.Log.d(TAG, "CSSInjector initialized with background: " + backgroundColor);
+        android.util.Log.d(TAG, "=== CSSInjector pluginInitialize END ===");
+    }
+
+    /**
+     * Setup WebViewClient synchronously to ensure it's ready BEFORE first page load
+     */
+    private void setupWebViewClientNow() {
+        try {
+            android.util.Log.d(TAG, "Setting up WebViewClient NOW (synchronous)...");
+            
+            if (webView == null) {
+                android.util.Log.w(TAG, "webView is null, scheduling retry...");
+                handler.postDelayed(this::setupWebViewClient, 50);
+                return;
+            }
+            
+            if (!(webView.getView() instanceof SystemWebView)) {
+                android.util.Log.e(TAG, "webView is not SystemWebView!");
+                return;
+            }
+            
+            SystemWebView systemWebView = (SystemWebView) webView.getView();
+            SystemWebViewEngine engine = (SystemWebViewEngine) webView.getEngine();
+
+            // Create custom SystemWebViewClient
+            SystemWebViewClient customClient = new SystemWebViewClient(engine) {
+                
+                @Override
+                public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                    String url = request.getUrl().toString();
+                    
+                    // Intercept HTML pages - use broader conditions
+                    boolean shouldIntercept = url.endsWith(".html") || 
+                                            url.endsWith("/") || 
+                                            url.contains("StaffPortalMobile") ||
+                                            url.contains("index.html") ||
+                                            (!url.contains(".") && !url.endsWith("/js") && !url.endsWith("/css"));
+                    
+                    if (shouldIntercept) {
+                        android.util.Log.d(TAG, "[Intercept] Intercepting URL: " + url);
+                        
+                        try {
+                            // Get response from cache/network (OSCache plugin)
+                            WebResourceResponse superResponse = super.shouldInterceptRequest(view, request);
+                            
+                            String html = null;
+                            String mimeType = "text/html";
+                            String encoding = "UTF-8";
+                            
+                            // Read HTML from response or assets
+                            if (superResponse != null && superResponse.getData() != null) {
+                                android.util.Log.d(TAG, "[Intercept] Reading from cache/network response");
+                                try {
+                                    html = readStream(superResponse.getData());
+                                    
+                                    // Preserve mime type and encoding from original response
+                                    if (superResponse.getMimeType() != null) {
+                                        mimeType = superResponse.getMimeType();
+                                    }
+                                    if (superResponse.getEncoding() != null) {
+                                        encoding = superResponse.getEncoding();
+                                    }
+                                } catch (Exception e) {
+                                    android.util.Log.e(TAG, "[Intercept] Failed to read response stream", e);
+                                    html = null;
+                                }
+                            }
+                            
+                            if (html == null) {
+                                // Fallback: read from assets
+                                android.util.Log.d(TAG, "[Intercept] Reading from assets");
+                                html = readHTMLFromAssets();
+                            }
+                            
+                            // Inject config + CSS if <head> exists
+                            if (html != null && html.contains("<head>")) {
+                                android.util.Log.d(TAG, "[Intercept] Found <head>, injecting scripts");
+                                
+                                StringBuilder injection = new StringBuilder("<head>");
+                                
+                                if (configScript != null) {
+                                    injection.append(configScript);
+                                    android.util.Log.d(TAG, "[Intercept] Config script added");
+                                } else {
+                                    android.util.Log.w(TAG, "[Intercept] configScript is NULL!");
+                                }
+                                
+                                if (cssInlineScript != null) {
+                                    injection.append(cssInlineScript);
+                                    android.util.Log.d(TAG, "[Intercept] CSS script added");
+                                } else {
+                                    android.util.Log.w(TAG, "[Intercept] cssInlineScript is NULL!");
+                                }
+                                
+                                html = html.replace("<head>", injection.toString());
+                                
+                                android.util.Log.d(TAG, "[Intercept] ✓ Returning modified HTML (" + html.length() + " bytes)");
+                                
+                                // Return modified HTML with preserved mime type and encoding
+                                return new WebResourceResponse(
+                                    mimeType,
+                                    encoding,
+                                    new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))
+                                );
+                            } else {
+                                if (html == null) {
+                                    android.util.Log.w(TAG, "[Intercept] HTML is NULL");
+                                } else {
+                                    android.util.Log.w(TAG, "[Intercept] HTML missing <head> tag");
+                                }
+                            }
+                        } catch (Exception e) {
+                            android.util.Log.e(TAG, "[Intercept] Exception during interception", e);
+                        }
+                    }
+                    
+                    // Return super response for other requests
+                    return super.shouldInterceptRequest(view, request);
+                }
+                
+                @Override
+                public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                    super.onPageStarted(view, url, favicon);
+                    android.util.Log.d(TAG, "[PageStarted] " + url);
+
+                    // Set native background IMMEDIATELY before any rendering
+                    if (backgroundColor != null && !backgroundColor.isEmpty()) {
+                        try {
+                            int color = parseHexColor(backgroundColor);
+                            view.setBackgroundColor(color);
+                        } catch (Exception e) {
+                            android.util.Log.e(TAG, "Failed to set bg on page start", e);
+                        }
+                    }
+                    
+                    // Inject config and CSS via JavaScript as BACKUP (in case intercept failed)
+                    handler.postDelayed(() -> {
+                        injectBuildConfig();
+                        injectBackgroundColorCSS(backgroundColor);
+                        injectCSSIntoWebView();
+                    }, 100);
+                    
+                    if (isFirstPageLoad) {
+                        android.util.Log.d(TAG, "[PageStarted] First page load detected");
+                        isFirstPageLoad = false;
+                    }
+                }
+
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    super.onPageFinished(view, url);
+                    android.util.Log.d(TAG, "[PageFinished] " + url);
+                    
+                    // Final fallback injection
+                    handler.postDelayed(() -> injectAllContent(), 200);
+                }
+            };
+
+            systemWebView.setWebViewClient(customClient);
+            webViewClientInstalled = true;
+            android.util.Log.d(TAG, "✓ Custom SystemWebViewClient installed successfully");
+            
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "CRITICAL: Failed to setup WebViewClient", e);
+        }
     }
 
     /**
@@ -115,8 +290,10 @@ public class CSSInjector extends CordovaPlugin {
             }
             
             if (config == null) {
-                android.util.Log.w(TAG, "No config found for script building");
-                return;
+                android.util.Log.e(TAG, "Cannot build config script - no config available");
+                // Create empty config as fallback
+                config = new JSONObject();
+                config.put("error", "Config file not found");
             }
             
             // Add background color to config
@@ -140,7 +317,7 @@ public class CSSInjector extends CordovaPlugin {
                 "})();" +
                 "</script>";
             
-            android.util.Log.d(TAG, "Config script built successfully");
+            android.util.Log.d(TAG, "✓ Config script built (" + configScript.length() + " bytes)");
         } catch (Exception e) {
             android.util.Log.e(TAG, "Failed to build config script", e);
         }
@@ -158,7 +335,7 @@ public class CSSInjector extends CordovaPlugin {
             }
             
             if (cssContent == null || cssContent.isEmpty()) {
-                android.util.Log.w(TAG, "No CSS found for inline script");
+                android.util.Log.e(TAG, "Cannot build CSS script - no CSS content");
                 return;
             }
             
@@ -183,135 +360,19 @@ public class CSSInjector extends CordovaPlugin {
                 "})();" +
                 "</script>";
             
-            android.util.Log.d(TAG, "CSS inline script built: " + cssContent.length() + " bytes");
+            android.util.Log.d(TAG, "✓ CSS inline script built (" + cssContent.length() + " bytes CSS)");
         } catch (Exception e) {
             android.util.Log.e(TAG, "Failed to build CSS inline script", e);
         }
     }
 
     /**
-     * Setup WebViewClient to intercept page load events
+     * Setup WebViewClient (async version for retry)
      */
     private void setupWebViewClient() {
         cordova.getActivity().runOnUiThread(() -> {
-            try {
-                if (webView != null && webView.getView() instanceof SystemWebView) {
-                    SystemWebView systemWebView = (SystemWebView) webView.getView();
-                    SystemWebViewEngine engine = (SystemWebViewEngine) webView.getEngine();
-
-                    // Create custom SystemWebViewClient
-                    SystemWebViewClient customClient = new SystemWebViewClient(engine) {
-                        
-                        @Override
-                        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                            String url = request.getUrl().toString();
-                            
-                            // Intercept HTML pages to inject config + CSS BEFORE any JS runs
-                            if (url.endsWith("index.html") || url.contains("StaffPortalMobile") || url.endsWith("/")) {
-                                android.util.Log.d(TAG, "[Intercept] URL: " + url);
-                                
-                                try {
-                                    // Get response from cache/network (OSCache plugin)
-                                    WebResourceResponse superResponse = super.shouldInterceptRequest(view, request);
-                                    
-                                    String html = null;
-                                    String mimeType = "text/html";
-                                    String encoding = "UTF-8";
-                                    
-                                    // Read HTML from response or assets
-                                    if (superResponse != null && superResponse.getData() != null) {
-                                        android.util.Log.d(TAG, "[Intercept] Reading from cache/network response");
-                                        html = readStream(superResponse.getData());
-                                        
-                                        // Preserve mime type and encoding from original response
-                                        if (superResponse.getMimeType() != null) {
-                                            mimeType = superResponse.getMimeType();
-                                        }
-                                        if (superResponse.getEncoding() != null) {
-                                            encoding = superResponse.getEncoding();
-                                        }
-                                    } else {
-                                        // Fallback: read from assets
-                                        android.util.Log.d(TAG, "[Intercept] Reading from assets");
-                                        html = readHTMLFromAssets();
-                                    }
-                                    
-                                    // Inject config + CSS if <head> exists
-                                    if (html != null && html.contains("<head>")) {
-                                        android.util.Log.d(TAG, "[Intercept] Injecting into <head>");
-                                        
-                                        StringBuilder injection = new StringBuilder("<head>");
-                                        
-                                        if (configScript != null) {
-                                            injection.append(configScript);
-                                        }
-                                        
-                                        if (cssInlineScript != null) {
-                                            injection.append(cssInlineScript);
-                                        }
-                                        
-                                        html = html.replace("<head>", injection.toString());
-                                        
-                                        android.util.Log.d(TAG, "[Intercept] Returning modified HTML (" + html.length() + " bytes)");
-                                        
-                                        // Return modified HTML with preserved mime type and encoding
-                                        return new WebResourceResponse(
-                                            mimeType,
-                                            encoding,
-                                            new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))
-                                        );
-                                    } else {
-                                        android.util.Log.w(TAG, "[Intercept] HTML invalid or missing <head>");
-                                    }
-                                } catch (Exception e) {
-                                    android.util.Log.e(TAG, "[Intercept] Failed", e);
-                                }
-                            }
-                            
-                            // Return super response for other requests
-                            return super.shouldInterceptRequest(view, request);
-                        }
-                        
-                        @Override
-                        public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                            super.onPageStarted(view, url, favicon);
-                            android.util.Log.d(TAG, "Page started: " + url);
-
-                            // Set native background IMMEDIATELY before any rendering
-                            if (backgroundColor != null && !backgroundColor.isEmpty()) {
-                                try {
-                                    int color = parseHexColor(backgroundColor);
-                                    view.setBackgroundColor(color);
-                                } catch (Exception e) {
-                                    android.util.Log.e(TAG, "Failed to set bg on page start", e);
-                                }
-                            }
-                            
-                            // Inject config and CSS via JavaScript as backup (for page reloads)
-                            injectBuildConfig();
-                            injectBackgroundColorCSS(backgroundColor);
-                            injectCSSIntoWebView();
-                            
-                            // For first page load, inject more aggressively
-                            if (isFirstPageLoad) {
-                                android.util.Log.d(TAG, "First page load - aggressive injection");
-                                isFirstPageLoad = false;
-                            }
-                        }
-
-                        @Override
-                        public void onPageFinished(WebView view, String url) {
-                            super.onPageFinished(view, url);
-                            android.util.Log.d(TAG, "Page finished: " + url);
-                            injectAllContent();
-                        }
-                    };
-
-                    systemWebView.setWebViewClient(customClient);
-                    android.util.Log.d(TAG, "Custom SystemWebViewClient installed");
-                }
-            } catch (Exception e) {
-                android.util.Log.e(TAG, "Failed to setup WebViewClient", e);
+            if (!webViewClientInstalled) {
+                setupWebViewClientNow();
             }
         });
     }
@@ -339,7 +400,7 @@ public class CSSInjector extends CordovaPlugin {
             return content.toString();
             
         } catch (IOException e) {
-            android.util.Log.e(TAG, "Failed to read HTML from assets", e);
+            android.util.Log.e(TAG, "Failed to read HTML from assets: " + INDEX_HTML_PATH, e);
             return null;
         }
     }
@@ -475,7 +536,7 @@ public class CSSInjector extends CordovaPlugin {
             return new JSONObject(content.toString());
             
         } catch (IOException e) {
-            android.util.Log.w(TAG, "Config file not found: " + CONFIG_FILE_PATH);
+            android.util.Log.e(TAG, "Config file not found: " + CONFIG_FILE_PATH, e);
             return null;
         } catch (JSONException e) {
             android.util.Log.e(TAG, "Failed to parse config JSON", e);
@@ -598,6 +659,8 @@ public class CSSInjector extends CordovaPlugin {
                         cordovaWebView.loadUrl("javascript:" + javascript);
                         android.util.Log.d(TAG, "CDN CSS injected (" + cssContent.length() + " bytes)");
                     }
+                } else {
+                    android.util.Log.e(TAG, "Cannot inject CSS - content is empty or null");
                 }
             } catch (Exception e) {
                 android.util.Log.e(TAG, "CSS injection failed", e);
@@ -618,11 +681,11 @@ public class CSSInjector extends CordovaPlugin {
             }
             reader.close();
             inputStream.close();
+            return cssContent.toString();
         } catch (IOException e) {
-            android.util.Log.e(TAG, "Failed to read CSS", e);
+            android.util.Log.e(TAG, "Failed to read CSS from: " + CSS_FILE_PATH, e);
             return null;
         }
-        return cssContent.toString();
     }
 
     private String buildCSSInjectionScript(String cssContent) {
