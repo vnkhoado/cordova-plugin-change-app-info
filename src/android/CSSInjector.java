@@ -30,6 +30,7 @@ public class CSSInjector extends CordovaPlugin {
     private static final String TAG = "CSSInjector";
     private static final String CSS_FILE_PATH = "www/assets/cdn-styles.css";
     private static final String CONFIG_FILE_PATH = "www/cordova-build-config.json";
+    private static final String INDEX_HTML_PATH = "www/index.html";
     
     private String cachedCSS = null;
     private JSONObject cachedConfig = null;
@@ -39,6 +40,7 @@ public class CSSInjector extends CordovaPlugin {
     private boolean isInjecting = false;
     private boolean isFirstPageLoad = true;
     private String configScript = null;
+    private String cssInlineScript = null;
 
     @Override
     public void pluginInitialize() {
@@ -82,8 +84,9 @@ public class CSSInjector extends CordovaPlugin {
         cachedCSS = readCSSFromAssets();
         cachedConfig = readConfigFromAssets();
         
-        // Pre-build config script for injection
+        // Pre-build inline scripts for HTML injection
         buildConfigScript();
+        buildCSSInlineScript();
         
         handler = new Handler(Looper.getMainLooper());
         
@@ -101,7 +104,7 @@ public class CSSInjector extends CordovaPlugin {
     }
 
     /**
-     * Build config script that will be injected into HTML
+     * Build config script that will be injected into HTML <head>
      */
     private void buildConfigScript() {
         try {
@@ -123,16 +126,16 @@ public class CSSInjector extends CordovaPlugin {
             
             String configJSON = config.toString();
             
-            // Build inline script
+            // Build inline script that runs IMMEDIATELY
             configScript = "<script type='text/javascript'>" +
                 "(function(){" +
                 "try{" +
                 "var config=" + configJSON + ";" +
                 "window.CORDOVA_BUILD_CONFIG=config;" +
                 "window.AppConfig=config;" +
-                "console.log('[Native-Inline] Config injected:',config);" +
+                "console.log('[Inline-Config] Injected:',config);" +
                 "}catch(e){" +
-                "console.error('[Native-Inline] Config failed:',e);" +
+                "console.error('[Inline-Config] Failed:',e);" +
                 "}" +
                 "})();" +
                 "</script>";
@@ -144,16 +147,56 @@ public class CSSInjector extends CordovaPlugin {
     }
 
     /**
+     * Build CSS inline script that will be injected into HTML <head>
+     */
+    private void buildCSSInlineScript() {
+        try {
+            String cssContent = cachedCSS;
+            if (cssContent == null || cssContent.isEmpty()) {
+                cssContent = readCSSFromAssets();
+                cachedCSS = cssContent;
+            }
+            
+            if (cssContent == null || cssContent.isEmpty()) {
+                android.util.Log.w(TAG, "No CSS found for inline script");
+                return;
+            }
+            
+            // Encode CSS to base64 for safe inline injection
+            byte[] cssBytes = cssContent.getBytes(StandardCharsets.UTF_8);
+            String base64CSS = Base64.encodeToString(cssBytes, Base64.NO_WRAP);
+            
+            // Build inline script
+            cssInlineScript = "<script type='text/javascript'>" +
+                "(function(){" +
+                "try{" +
+                "var b64='" + base64CSS + "';" +
+                "var css=decodeURIComponent(escape(atob(b64)));" +
+                "var s=document.createElement('style');" +
+                "s.id='cdn-styles-inline';" +
+                "s.textContent=css;" +
+                "(document.head||document.getElementsByTagName('head')[0]).appendChild(s);" +
+                "console.log('[Inline-CSS] Injected',css.length,'bytes');" +
+                "}catch(e){" +
+                "console.error('[Inline-CSS] Failed:',e);" +
+                "}" +
+                "})();" +
+                "</script>";
+            
+            android.util.Log.d(TAG, "CSS inline script built: " + cssContent.length() + " bytes");
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Failed to build CSS inline script", e);
+        }
+    }
+
+    /**
      * Setup WebViewClient to intercept page load events
      */
-
     private void setupWebViewClient() {
         cordova.getActivity().runOnUiThread(() -> {
             try {
                 if (webView != null && webView.getView() instanceof SystemWebView) {
                     SystemWebView systemWebView = (SystemWebView) webView.getView();
-
-                    // Get the engine
                     SystemWebViewEngine engine = (SystemWebViewEngine) webView.getEngine();
 
                     // Create custom SystemWebViewClient
@@ -163,22 +206,44 @@ public class CSSInjector extends CordovaPlugin {
                         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                             String url = request.getUrl().toString();
                             
-                            // FIX: Intercept HTML pages to inject config BEFORE any JS runs
-                            if (url.endsWith("index.html") || url.contains("StaffPortalMobile")) {
+                            // Intercept HTML pages to inject config + CSS BEFORE any JS runs
+                            if (url.endsWith("index.html") || url.contains("StaffPortalMobile") || url.endsWith("/")) {
+                                android.util.Log.d(TAG, "[Intercept] Checking URL: " + url);
+                                
                                 try {
-                                    android.util.Log.d(TAG, "Intercepting: " + url);
+                                    // First, try to get response from cache/network (OSCache plugin)
+                                    WebResourceResponse superResponse = super.shouldInterceptRequest(view, request);
                                     
-                                    // Get original HTML from cache/network
-                                    WebResourceResponse response = super.shouldInterceptRequest(view, request);
-                                    if (response != null && response.getData() != null) {
-                                        // Read original HTML
-                                        String html = readStream(response.getData());
+                                    String html = null;
+                                    
+                                    // If OSCache or network provides response, use it
+                                    if (superResponse != null && superResponse.getData() != null) {
+                                        android.util.Log.d(TAG, "[Intercept] Got response from super (cache/network)");
+                                        html = readStream(superResponse.getData());
+                                    } else {
+                                        // Otherwise, read from assets directly
+                                        android.util.Log.d(TAG, "[Intercept] No super response, reading from assets");
+                                        html = readHTMLFromAssets();
+                                    }
+                                    
+                                    if (html != null && html.contains("<head>")) {
+                                        android.util.Log.d(TAG, "[Intercept] Injecting config + CSS into HTML");
                                         
-                                        // Inject config script at the very beginning of <head>
-                                        if (configScript != null && html.contains("<head>")) {
-                                            html = html.replace("<head>", "<head>" + configScript);
-                                            android.util.Log.d(TAG, "Config injected into HTML head");
+                                        // Inject BOTH config and CSS scripts right after <head>
+                                        StringBuilder injection = new StringBuilder();
+                                        injection.append("<head>");
+                                        
+                                        if (configScript != null) {
+                                            injection.append(configScript);
                                         }
+                                        
+                                        if (cssInlineScript != null) {
+                                            injection.append(cssInlineScript);
+                                        }
+                                        
+                                        html = html.replace("<head>", injection.toString());
+                                        
+                                        android.util.Log.d(TAG, "[Intercept] Returning modified HTML");
                                         
                                         // Return modified HTML
                                         return new WebResourceResponse(
@@ -186,9 +251,11 @@ public class CSSInjector extends CordovaPlugin {
                                             "UTF-8",
                                             new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))
                                         );
+                                    } else {
+                                        android.util.Log.w(TAG, "[Intercept] HTML invalid or missing <head>");
                                     }
                                 } catch (Exception e) {
-                                    android.util.Log.e(TAG, "Failed to intercept HTML", e);
+                                    android.util.Log.e(TAG, "[Intercept] Failed to inject HTML", e);
                                 }
                             }
                             
@@ -200,23 +267,21 @@ public class CSSInjector extends CordovaPlugin {
                             super.onPageStarted(view, url, favicon);
                             android.util.Log.d(TAG, "Page started: " + url);
 
-                            // FIX: Set native background immediately
+                            // Set native background immediately
                             if (backgroundColor != null && !backgroundColor.isEmpty()) {
                                 try {
                                     int color = parseHexColor(backgroundColor);
                                     view.setBackgroundColor(color);
-                                    
-                                    // FIX: Inject background CSS immediately when page starts
                                     injectBackgroundColorCSS(backgroundColor);
                                 } catch (Exception e) {
                                     android.util.Log.e(TAG, "Failed to set bg on page start", e);
                                 }
                             }
                             
-                            // FIX: Inject config IMMEDIATELY via JavaScript as backup
+                            // Inject config via JavaScript as backup
                             injectBuildConfig();
                             
-                            // FIX: For first page load, inject aggressively
+                            // For first page load, inject aggressively
                             if (isFirstPageLoad) {
                                 android.util.Log.d(TAG, "First page load - aggressive injection");
                                 injectAllContent();
@@ -228,8 +293,6 @@ public class CSSInjector extends CordovaPlugin {
                         public void onPageFinished(WebView view, String url) {
                             super.onPageFinished(view, url);
                             android.util.Log.d(TAG, "Page finished: " + url);
-
-                            // FIX: Inject immediately without delay
                             injectAllContent();
                         }
                     };
@@ -241,6 +304,34 @@ public class CSSInjector extends CordovaPlugin {
                 android.util.Log.e(TAG, "Failed to setup WebViewClient", e);
             }
         });
+    }
+
+    /**
+     * Read HTML file from assets (www/index.html)
+     */
+    private String readHTMLFromAssets() {
+        StringBuilder content = new StringBuilder();
+        try {
+            InputStream inputStream = cordova.getActivity().getAssets().open(INDEX_HTML_PATH);
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(inputStream, StandardCharsets.UTF_8)
+            );
+            
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line).append("\n");
+            }
+            
+            reader.close();
+            inputStream.close();
+            
+            android.util.Log.d(TAG, "Read HTML from assets: " + content.length() + " chars");
+            return content.toString();
+            
+        } catch (IOException e) {
+            android.util.Log.e(TAG, "Failed to read HTML from assets", e);
+            return null;
+        }
     }
 
     /**
@@ -260,7 +351,6 @@ public class CSSInjector extends CordovaPlugin {
     public void onResume(boolean multitasking) {
         super.onResume(multitasking);
         
-        // FIX: Inject immediately on first resume
         if (!initialInjectionDone) {
             injectAllContent();
             initialInjectionDone = true;
@@ -274,7 +364,6 @@ public class CSSInjector extends CordovaPlugin {
      * Inject all content: config, background CSS, CDN CSS
      */
     private void injectAllContent() {
-        // Prevent duplicate injections
         if (isInjecting) {
             android.util.Log.d(TAG, "Already injecting, skipping...");
             return;
@@ -283,20 +372,16 @@ public class CSSInjector extends CordovaPlugin {
         isInjecting = true;
         
         try {
-            // 1. Inject build config into window FIRST (most important)
             injectBuildConfig();
             
-            // 2. Inject background color CSS immediately
             if (backgroundColor != null && !backgroundColor.isEmpty()) {
                 injectBackgroundColorCSS(backgroundColor);
             }
             
-            // 3. Inject CDN CSS with minimal delay
             handler.postDelayed(() -> injectCSSIntoWebView(), 50);
             
             android.util.Log.d(TAG, "All content injection scheduled");
         } finally {
-            // Reset flag after a delay
             handler.postDelayed(() -> {
                 isInjecting = false;
             }, 300);
@@ -320,12 +405,10 @@ public class CSSInjector extends CordovaPlugin {
                     return;
                 }
                 
-                // Add background color to config
                 if (backgroundColor != null && !backgroundColor.isEmpty()) {
                     config.put("backgroundColor", backgroundColor);
                 }
                 
-                // Convert to JSON string and escape for JavaScript
                 String configJSON = config.toString();
                 String escapedJSON = configJSON
                     .replace("\\", "\\\\")
@@ -397,7 +480,6 @@ public class CSSInjector extends CordovaPlugin {
             callbackContext.success("CSS injected");
             return true;
         } else if (action.equals("getConfig")) {
-            // Allow JS to get config on demand
             JSONObject config = cachedConfig != null ? cachedConfig : readConfigFromAssets();
             if (config != null) {
                 callbackContext.success(config);
@@ -406,7 +488,6 @@ public class CSSInjector extends CordovaPlugin {
             }
             return true;
         } else if (action.equals("injectBackground")) {
-            // Allow JS to manually trigger background injection
             if (backgroundColor != null && !backgroundColor.isEmpty()) {
                 injectBackgroundColorCSS(backgroundColor);
                 callbackContext.success("Background injected: " + backgroundColor);
@@ -438,13 +519,11 @@ public class CSSInjector extends CordovaPlugin {
     }
 
     /**
-     * Inject background color CSS - OPTIMIZED VERSION
-     * Single injection, no repetition
+     * Inject background color CSS
      */
     private void injectBackgroundColorCSS(final String bgColor) {
         cordova.getActivity().runOnUiThread(() -> {
             try {
-                // Set native WebView background FIRST
                 if (webView != null && webView.getView() != null) {
                     try {
                         int color = parseHexColor(bgColor);
@@ -454,10 +533,8 @@ public class CSSInjector extends CordovaPlugin {
                     }
                 }
                 
-                // Then inject CSS
                 CordovaWebView cordovaWebView = this.webView;
                 if (cordovaWebView != null) {
-                    // CSS with multiple selectors for better coverage
                     String css = "html, body, #root, #app, .app-container, .screen, .page-wrapper { " +
                         "background-color: " + bgColor + " !important; " +
                         "background: " + bgColor + " !important; " +
