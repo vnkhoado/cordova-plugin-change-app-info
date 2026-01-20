@@ -90,15 +90,15 @@ public class CSSInjector extends CordovaPlugin {
         
         handler = new Handler(Looper.getMainLooper());
         
-        // Setup WebViewClient to listen for page loads
+        // Setup WebViewClient FIRST to intercept early page loads
         setupWebViewClient();
         
-        // FIX: Pre-inject CSS early to ensure it's ready
-        handler.postDelayed(() -> {
-            android.util.Log.d(TAG, "Early CSS pre-injection");
+        // FIX: Inject immediately without delay to ensure CSS is ready before page loads
+        cordova.getActivity().runOnUiThread(() -> {
+            android.util.Log.d(TAG, "Immediate early injection");
             injectBackgroundColorCSS(backgroundColor);
             injectCSSIntoWebView();
-        }, 100);
+        });
         
         android.util.Log.d(TAG, "CSSInjector initialized with background: " + backgroundColor);
     }
@@ -208,30 +208,39 @@ public class CSSInjector extends CordovaPlugin {
                             
                             // Intercept HTML pages to inject config + CSS BEFORE any JS runs
                             if (url.endsWith("index.html") || url.contains("StaffPortalMobile") || url.endsWith("/")) {
-                                android.util.Log.d(TAG, "[Intercept] Checking URL: " + url);
+                                android.util.Log.d(TAG, "[Intercept] URL: " + url);
                                 
                                 try {
-                                    // First, try to get response from cache/network (OSCache plugin)
+                                    // Get response from cache/network (OSCache plugin)
                                     WebResourceResponse superResponse = super.shouldInterceptRequest(view, request);
                                     
                                     String html = null;
+                                    String mimeType = "text/html";
+                                    String encoding = "UTF-8";
                                     
-                                    // If OSCache or network provides response, use it
+                                    // Read HTML from response or assets
                                     if (superResponse != null && superResponse.getData() != null) {
-                                        android.util.Log.d(TAG, "[Intercept] Got response from super (cache/network)");
+                                        android.util.Log.d(TAG, "[Intercept] Reading from cache/network response");
                                         html = readStream(superResponse.getData());
+                                        
+                                        // Preserve mime type and encoding from original response
+                                        if (superResponse.getMimeType() != null) {
+                                            mimeType = superResponse.getMimeType();
+                                        }
+                                        if (superResponse.getEncoding() != null) {
+                                            encoding = superResponse.getEncoding();
+                                        }
                                     } else {
-                                        // Otherwise, read from assets directly
-                                        android.util.Log.d(TAG, "[Intercept] No super response, reading from assets");
+                                        // Fallback: read from assets
+                                        android.util.Log.d(TAG, "[Intercept] Reading from assets");
                                         html = readHTMLFromAssets();
                                     }
                                     
+                                    // Inject config + CSS if <head> exists
                                     if (html != null && html.contains("<head>")) {
-                                        android.util.Log.d(TAG, "[Intercept] Injecting config + CSS into HTML");
+                                        android.util.Log.d(TAG, "[Intercept] Injecting into <head>");
                                         
-                                        // Inject BOTH config and CSS scripts right after <head>
-                                        StringBuilder injection = new StringBuilder();
-                                        injection.append("<head>");
+                                        StringBuilder injection = new StringBuilder("<head>");
                                         
                                         if (configScript != null) {
                                             injection.append(configScript);
@@ -243,22 +252,23 @@ public class CSSInjector extends CordovaPlugin {
                                         
                                         html = html.replace("<head>", injection.toString());
                                         
-                                        android.util.Log.d(TAG, "[Intercept] Returning modified HTML");
+                                        android.util.Log.d(TAG, "[Intercept] Returning modified HTML (" + html.length() + " bytes)");
                                         
-                                        // Return modified HTML
+                                        // Return modified HTML with preserved mime type and encoding
                                         return new WebResourceResponse(
-                                            "text/html",
-                                            "UTF-8",
+                                            mimeType,
+                                            encoding,
                                             new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))
                                         );
                                     } else {
                                         android.util.Log.w(TAG, "[Intercept] HTML invalid or missing <head>");
                                     }
                                 } catch (Exception e) {
-                                    android.util.Log.e(TAG, "[Intercept] Failed to inject HTML", e);
+                                    android.util.Log.e(TAG, "[Intercept] Failed", e);
                                 }
                             }
                             
+                            // Return super response for other requests
                             return super.shouldInterceptRequest(view, request);
                         }
                         
@@ -267,24 +277,24 @@ public class CSSInjector extends CordovaPlugin {
                             super.onPageStarted(view, url, favicon);
                             android.util.Log.d(TAG, "Page started: " + url);
 
-                            // Set native background immediately
+                            // Set native background IMMEDIATELY before any rendering
                             if (backgroundColor != null && !backgroundColor.isEmpty()) {
                                 try {
                                     int color = parseHexColor(backgroundColor);
                                     view.setBackgroundColor(color);
-                                    injectBackgroundColorCSS(backgroundColor);
                                 } catch (Exception e) {
                                     android.util.Log.e(TAG, "Failed to set bg on page start", e);
                                 }
                             }
                             
-                            // Inject config via JavaScript as backup
+                            // Inject config and CSS via JavaScript as backup (for page reloads)
                             injectBuildConfig();
+                            injectBackgroundColorCSS(backgroundColor);
+                            injectCSSIntoWebView();
                             
-                            // For first page load, inject aggressively
+                            // For first page load, inject more aggressively
                             if (isFirstPageLoad) {
                                 android.util.Log.d(TAG, "First page load - aggressive injection");
-                                injectAllContent();
                                 isFirstPageLoad = false;
                             }
                         }
