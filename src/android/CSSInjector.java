@@ -4,6 +4,8 @@ import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
 
 import org.apache.cordova.CallbackContext;
@@ -17,6 +19,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -35,6 +38,7 @@ public class CSSInjector extends CordovaPlugin {
     private boolean initialInjectionDone = false;
     private boolean isInjecting = false;
     private boolean isFirstPageLoad = true;
+    private String configScript = null;
 
     @Override
     public void pluginInitialize() {
@@ -78,6 +82,9 @@ public class CSSInjector extends CordovaPlugin {
         cachedCSS = readCSSFromAssets();
         cachedConfig = readConfigFromAssets();
         
+        // Pre-build config script for injection
+        buildConfigScript();
+        
         handler = new Handler(Looper.getMainLooper());
         
         // Setup WebViewClient to listen for page loads
@@ -91,6 +98,49 @@ public class CSSInjector extends CordovaPlugin {
         }, 100);
         
         android.util.Log.d(TAG, "CSSInjector initialized with background: " + backgroundColor);
+    }
+
+    /**
+     * Build config script that will be injected into HTML
+     */
+    private void buildConfigScript() {
+        try {
+            JSONObject config = cachedConfig;
+            if (config == null) {
+                config = readConfigFromAssets();
+                cachedConfig = config;
+            }
+            
+            if (config == null) {
+                android.util.Log.w(TAG, "No config found for script building");
+                return;
+            }
+            
+            // Add background color to config
+            if (backgroundColor != null && !backgroundColor.isEmpty()) {
+                config.put("backgroundColor", backgroundColor);
+            }
+            
+            String configJSON = config.toString();
+            
+            // Build inline script
+            configScript = "<script type='text/javascript'>" +
+                "(function(){" +
+                "try{" +
+                "var config=" + configJSON + ";" +
+                "window.CORDOVA_BUILD_CONFIG=config;" +
+                "window.AppConfig=config;" +
+                "console.log('[Native-Inline] Config injected:',config);" +
+                "}catch(e){" +
+                "console.error('[Native-Inline] Config failed:',e);" +
+                "}" +
+                "})();" +
+                "</script>";
+            
+            android.util.Log.d(TAG, "Config script built successfully");
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Failed to build config script", e);
+        }
     }
 
     /**
@@ -108,6 +158,43 @@ public class CSSInjector extends CordovaPlugin {
 
                     // Create custom SystemWebViewClient
                     SystemWebViewClient customClient = new SystemWebViewClient(engine) {
+                        
+                        @Override
+                        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                            String url = request.getUrl().toString();
+                            
+                            // FIX: Intercept HTML pages to inject config BEFORE any JS runs
+                            if (url.endsWith("index.html") || url.contains("StaffPortalMobile")) {
+                                try {
+                                    android.util.Log.d(TAG, "Intercepting: " + url);
+                                    
+                                    // Get original HTML from cache/network
+                                    WebResourceResponse response = super.shouldInterceptRequest(view, request);
+                                    if (response != null && response.getData() != null) {
+                                        // Read original HTML
+                                        String html = readStream(response.getData());
+                                        
+                                        // Inject config script at the very beginning of <head>
+                                        if (configScript != null && html.contains("<head>")) {
+                                            html = html.replace("<head>", "<head>" + configScript);
+                                            android.util.Log.d(TAG, "Config injected into HTML head");
+                                        }
+                                        
+                                        // Return modified HTML
+                                        return new WebResourceResponse(
+                                            "text/html",
+                                            "UTF-8",
+                                            new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))
+                                        );
+                                    }
+                                } catch (Exception e) {
+                                    android.util.Log.e(TAG, "Failed to intercept HTML", e);
+                                }
+                            }
+                            
+                            return super.shouldInterceptRequest(view, request);
+                        }
+                        
                         @Override
                         public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                             super.onPageStarted(view, url, favicon);
@@ -125,6 +212,9 @@ public class CSSInjector extends CordovaPlugin {
                                     android.util.Log.e(TAG, "Failed to set bg on page start", e);
                                 }
                             }
+                            
+                            // FIX: Inject config IMMEDIATELY via JavaScript as backup
+                            injectBuildConfig();
                             
                             // FIX: For first page load, inject aggressively
                             if (isFirstPageLoad) {
@@ -153,6 +243,18 @@ public class CSSInjector extends CordovaPlugin {
         });
     }
 
+    /**
+     * Read InputStream to String
+     */
+    private String readStream(InputStream is) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            sb.append(line).append("\n");
+        }
+        return sb.toString();
+    }
 
     @Override
     public void onResume(boolean multitasking) {
@@ -238,18 +340,18 @@ public class CSSInjector extends CordovaPlugin {
                         "    var config = JSON.parse(\"" + escapedJSON + "\");" +
                         "    window.CORDOVA_BUILD_CONFIG = config;" +
                         "    window.AppConfig = config;" +
-                        "    console.log('[Native] Build config injected:', config);" +
+                        "    console.log('[Native-JS] Build config injected:', config);" +
                         "    " +
                         "    if (typeof CustomEvent !== 'undefined') {" +
                         "      window.dispatchEvent(new CustomEvent('cordova-config-ready', { detail: config }));" +
                         "    }" +
                         "  } catch(e) {" +
-                        "    console.error('[Native] Config injection failed:', e);" +
+                        "    console.error('[Native-JS] Config injection failed:', e);" +
                         "  }" +
                         "})();";
                     
                     cordovaWebView.loadUrl("javascript:" + javascript);
-                    android.util.Log.d(TAG, "Build config injected");
+                    android.util.Log.d(TAG, "Build config injected via JavaScript");
                 }
             } catch (Exception e) {
                 android.util.Log.e(TAG, "Failed to inject build config", e);
