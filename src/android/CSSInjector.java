@@ -34,6 +34,7 @@ public class CSSInjector extends CordovaPlugin {
     private String backgroundColor = null;
     private boolean initialInjectionDone = false;
     private boolean isInjecting = false;
+    private boolean isFirstPageLoad = true;
 
     @Override
     public void pluginInitialize() {
@@ -82,6 +83,13 @@ public class CSSInjector extends CordovaPlugin {
         // Setup WebViewClient to listen for page loads
         setupWebViewClient();
         
+        // FIX: Pre-inject CSS early to ensure it's ready
+        handler.postDelayed(() -> {
+            android.util.Log.d(TAG, "Early CSS pre-injection");
+            injectBackgroundColorCSS(backgroundColor);
+            injectCSSIntoWebView();
+        }, 100);
+        
         android.util.Log.d(TAG, "CSSInjector initialized with background: " + backgroundColor);
     }
 
@@ -105,14 +113,24 @@ public class CSSInjector extends CordovaPlugin {
                             super.onPageStarted(view, url, favicon);
                             android.util.Log.d(TAG, "Page started: " + url);
 
-                            // Set native background immediately
+                            // FIX: Set native background immediately
                             if (backgroundColor != null && !backgroundColor.isEmpty()) {
                                 try {
                                     int color = parseHexColor(backgroundColor);
                                     view.setBackgroundColor(color);
+                                    
+                                    // FIX: Inject background CSS immediately when page starts
+                                    injectBackgroundColorCSS(backgroundColor);
                                 } catch (Exception e) {
                                     android.util.Log.e(TAG, "Failed to set bg on page start", e);
                                 }
+                            }
+                            
+                            // FIX: For first page load, inject aggressively
+                            if (isFirstPageLoad) {
+                                android.util.Log.d(TAG, "First page load - aggressive injection");
+                                injectAllContent();
+                                isFirstPageLoad = false;
                             }
                         }
 
@@ -121,10 +139,8 @@ public class CSSInjector extends CordovaPlugin {
                             super.onPageFinished(view, url);
                             android.util.Log.d(TAG, "Page finished: " + url);
 
-                            // Inject content after page loads
-                            handler.postDelayed(() -> {
-                                injectAllContent();
-                            }, 50);
+                            // FIX: Inject immediately without delay
+                            injectAllContent();
                         }
                     };
 
@@ -142,12 +158,11 @@ public class CSSInjector extends CordovaPlugin {
     public void onResume(boolean multitasking) {
         super.onResume(multitasking);
         
-        // Only inject on first resume
+        // FIX: Inject immediately on first resume
         if (!initialInjectionDone) {
-            handler.postDelayed(() -> {
-                injectAllContent();
-                initialInjectionDone = true;
-            }, 200);
+            injectAllContent();
+            initialInjectionDone = true;
+            android.util.Log.d(TAG, "onResume - immediate injection");
         }
         
         android.util.Log.d(TAG, "onResume");
@@ -169,20 +184,20 @@ public class CSSInjector extends CordovaPlugin {
             // 1. Inject build config into window FIRST (most important)
             injectBuildConfig();
             
-            // 2. Inject background color CSS
+            // 2. Inject background color CSS immediately
             if (backgroundColor != null && !backgroundColor.isEmpty()) {
-                handler.postDelayed(() -> injectBackgroundColorCSS(backgroundColor), 100);
+                injectBackgroundColorCSS(backgroundColor);
             }
             
-            // 3. Inject CDN CSS
-            handler.postDelayed(() -> injectCSSIntoWebView(), 200);
+            // 3. Inject CDN CSS with minimal delay
+            handler.postDelayed(() -> injectCSSIntoWebView(), 50);
             
             android.util.Log.d(TAG, "All content injection scheduled");
         } finally {
             // Reset flag after a delay
             handler.postDelayed(() -> {
                 isInjecting = false;
-            }, 500);
+            }, 300);
         }
     }
 
