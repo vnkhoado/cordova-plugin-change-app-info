@@ -19,6 +19,7 @@ const { getConfigParser } = require('./utils');
  *   - Read hostname from OutSystems preferences (hostname, DefaultHostname)
  *   - Read from environment variables (MABS)
  *   - Support multiple config sources
+ *   - Support custom preferences (TENANT_ID, etc.) ✨ NEW
  */
 
 /**
@@ -52,6 +53,47 @@ function getConfigValue(envName, prefNames, config, defaultValue = '') {
     console.log(`   ⚠️  ${prefNames[0]} not found, using empty string`);
   }
   return defaultValue;
+}
+
+/**
+ * ✨ NEW: Get all custom preferences that start with specific prefixes
+ * This allows dynamic custom fields without hardcoding
+ */
+function getCustomPreferences(config) {
+  const customPrefs = {};
+  
+  // Define which prefixes to look for
+  const customPrefixes = ['TENANT_', 'CUSTOM_', 'CLIENT_', 'APP_CUSTOM_'];
+  
+  try {
+    // Get config.xml path and read it
+    const configXml = config.doc;
+    if (!configXml) return customPrefs;
+    
+    // Find all preference elements
+    const preferences = configXml.findall('./preference');
+    
+    preferences.forEach(pref => {
+      const name = pref.attrib.name;
+      const value = pref.attrib.value;
+      
+      // Check if preference matches any custom prefix
+      const isCustom = customPrefixes.some(prefix => name.startsWith(prefix));
+      
+      if (isCustom && value) {
+        // Convert preference name to camelCase for consistency
+        // TENANT_ID -> tenantId
+        // CUSTOM_FIELD_1 -> customField1
+        const camelCaseName = name.toLowerCase().replace(/_(.)/g, (_, char) => char.toUpperCase());
+        customPrefs[camelCaseName] = value;
+        console.log(`   ✨ Custom preference: ${name} = ${value}`);
+      }
+    });
+  } catch (error) {
+    console.log(`   ⚠️  Could not read custom preferences: ${error.message}`);
+  }
+  
+  return customPrefs;
 }
 
 /**
@@ -113,7 +155,9 @@ function createBuildConfigJSON(buildInfo, configPath, root, wwwPath) {
       buildTimestamp: buildInfo.buildTimestamp,
       environment: buildInfo.environment || 'production',
       apiHostname: buildInfo.apiHostname || '',
-      cdnIcon: buildInfo.cdnIcon || ''
+      cdnIcon: buildInfo.cdnIcon || '',
+      // ✨ Include custom preferences
+      ...buildInfo.customPreferences
     }
   };
   
@@ -150,7 +194,9 @@ function createNativeConfig(buildInfo, wwwPath) {
     buildTimestamp: buildInfo.buildTimestamp,
     environment: buildInfo.environment || 'production',
     apiHostname: buildInfo.apiHostname || '',
-    cdnIcon: buildInfo.cdnIcon || ''
+    cdnIcon: buildInfo.cdnIcon || '',
+    // ✨ Include all custom preferences
+    ...buildInfo.customPreferences
   };
   
   const nativeConfigPath = path.join(wwwPath, 'cordova-build-config.json');
@@ -233,6 +279,14 @@ function injectBuildInfo(context, platform) {
     console.log('   - (none found)');
   }
   
+  // ✨ Get custom preferences
+  console.log('\n   🔍 Custom preferences:');
+  const customPreferences = getCustomPreferences(config);
+  
+  if (Object.keys(customPreferences).length === 0) {
+    console.log('   - (none found)');
+  }
+  
   // Prepare build info with fallback chain
   const buildInfo = {
     appName: getConfigValue('APP_NAME', ['APP_NAME'], config, config.name() || 'Unknown'),
@@ -247,7 +301,9 @@ function injectBuildInfo(context, platform) {
     // Try multiple preference names for hostname (OutSystems compatibility)
     apiHostname: getConfigValue('API_HOSTNAME', ['hostname', 'DefaultHostname', 'API_HOSTNAME'], config),
     environment: getConfigValue('ENVIRONMENT', ['ENVIRONMENT'], config, 'production'),
-    cdnIcon: getConfigValue('CDN_ICON', ['CDN_ICON'], config)
+    cdnIcon: getConfigValue('CDN_ICON', ['CDN_ICON'], config),
+    // ✨ Include all custom preferences
+    customPreferences: customPreferences
   };
   
   console.log('\n   📦 Build Info:');
@@ -255,6 +311,14 @@ function injectBuildInfo(context, platform) {
   console.log(`   - apiHostname: ${buildInfo.apiHostname || '(empty)'}`);
   console.log(`   - environment: ${buildInfo.environment}`);
   console.log(`   - platform: ${buildInfo.platform}`);
+  
+  // Log custom preferences
+  if (Object.keys(customPreferences).length > 0) {
+    console.log('\n   ✨ Custom preferences in build:');
+    Object.keys(customPreferences).forEach(key => {
+      console.log(`   - ${key}: ${customPreferences[key]}`);
+    });
+  }
   
   // Determine www path
   let wwwPath;
@@ -291,6 +355,9 @@ function injectBuildInfo(context, platform) {
   if (nativeConfigCreated) {
     console.log('   ✅ Config files created for native injection');
     console.log('   ℹ️  Native plugins will inject config into window.CORDOVA_BUILD_CONFIG');
+    if (Object.keys(customPreferences).length > 0) {
+      console.log('   ✨ Custom preferences included in config');
+    }
   } else {
     console.log('   ⚠️  Native config creation may have failed - check manually');
   }
@@ -304,6 +371,7 @@ module.exports = function(context) {
   
   console.log('\n══════════════════════════════════════════════');
   console.log('  INJECT BUILD INFO (Native Injection Ready)');
+  console.log('  ✨ With Custom Preferences Support');
   console.log('══════════════════════════════════════════════');
   
   for (const platform of platforms) {
