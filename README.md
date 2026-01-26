@@ -14,6 +14,7 @@ Cordova plugin to change app info (display name, version, icon) from CDN at buil
 - Set app display name dynamically
 - Configure version number and build code
 - Download and set app icon from CDN URL (requires sharp or jimp)
+- **Custom preferences support** - Inject any custom fields (TENANT_ID, etc.) 🆕
 
 ✅ **JSON Config Storage**
 - Saves app info to multiple locations for redundancy
@@ -84,6 +85,42 @@ cordova build android ios
 | `ENVIRONMENT` | Environment name | `"production"` |
 | `API_HOSTNAME` | API base URL | `"https://api.example.com"` |
 
+### Custom Preferences 🆕
+
+**Inject any custom data into your app config!** The plugin automatically detects preferences starting with:
+- `TENANT_*` (e.g., `TENANT_ID`, `TENANT_NAME`)
+- `CUSTOM_*` (e.g., `CUSTOM_FIELD_1`, `CUSTOM_API_KEY`)
+- `CLIENT_*` (e.g., `CLIENT_ID`, `CLIENT_SECRET`)
+- `APP_CUSTOM_*` (e.g., `APP_CUSTOM_CONFIG`)
+
+**Example:**
+
+```xml
+<!-- config.xml -->
+<preference name="TENANT_ID" value="1118" />
+<preference name="TENANT_NAME" value="MyCompany" />
+<preference name="CUSTOM_API_KEY" value="abc123" />
+<preference name="CLIENT_DOMAIN" value="client.example.com" />
+```
+
+**Access in JavaScript:**
+
+```javascript
+document.addEventListener('deviceready', () => {
+    const config = window.CORDOVA_BUILD_CONFIG;
+    
+    console.log('Tenant ID:', config.tenantId);        // "1118"
+    console.log('Tenant Name:', config.tenantName);    // "MyCompany"
+    console.log('API Key:', config.customApiKey);      // "abc123"
+    console.log('Domain:', config.clientDomain);       // "client.example.com"
+});
+```
+
+**Note:** Preference names are automatically converted to camelCase:
+- `TENANT_ID` → `tenantId`
+- `CUSTOM_FIELD_1` → `customField1`
+- `CLIENT_API_KEY` → `clientApiKey`
+
 ### Splash Screen Color
 
 **For OutSystems apps**, set ALL THREE:
@@ -124,6 +161,9 @@ document.addEventListener('deviceready', () => {
     console.log('API Hostname:', config.apiHostname);
     console.log('Environment:', config.environment);
     console.log('Platform:', config.platform);
+    
+    // Custom preferences
+    console.log('Tenant ID:', config.tenantId);
 });
 ```
 
@@ -139,6 +179,7 @@ document.addEventListener('deviceready', function() {
     // Use in your app
     $parameters.ClientVar_ApiHostname = config.apiHostname;
     $parameters.ClientVar_Environment = config.environment;
+    $parameters.ClientVar_TenantId = config.tenantId; // Custom field!
 });
 ```
 
@@ -158,7 +199,13 @@ document.addEventListener('deviceready', function() {
   "environment": "production",
   "apiHostname": "https://api.example.com",
   "cdnIcon": "https://cdn.example.com/icon.png",
-  "backgroundColor": "#FFFFFF"
+  "backgroundColor": "#FFFFFF",
+  
+  // Custom preferences (automatically included)
+  "tenantId": "1118",
+  "tenantName": "MyCompany",
+  "customApiKey": "abc123",
+  "clientDomain": "client.example.com"
 }
 ```
 
@@ -201,6 +248,11 @@ cordova.exec(
     <preference name="API_HOSTNAME" value="https://api.example.com" />
     <preference name="ENVIRONMENT" value="production" />
     
+    <!-- Custom Preferences -->
+    <preference name="TENANT_ID" value="1118" />
+    <preference name="TENANT_NAME" value="MyCompany" />
+    <preference name="CUSTOM_API_KEY" value="abc123" />
+    
     <!-- Splash Screen Color -->
     <preference name="BackgroundColor" value="#001833" />
     <preference name="SplashScreenBackgroundColor" value="#001833" />
@@ -222,7 +274,7 @@ cordova.exec(
 ```json
 {
   "plugin": {
-    "url": "https://github.com/vnkhoado/cordova-plugin-change-app-info.git#update-cordova-template-files"
+    "url": "https://github.com/vnkhoado/cordova-plugin-change-app-info.git#feature/custom-preferences-injection"
   },
   "preferences": {
     "global": [
@@ -249,6 +301,14 @@ cordova.exec(
       {
         "name": "ENVIRONMENT",
         "value": "production"
+      },
+      {
+        "name": "TENANT_ID",
+        "value": "1118"
+      },
+      {
+        "name": "TENANT_NAME",
+        "value": "MyCompany"
       },
       {
         "name": "BackgroundColor",
@@ -290,7 +350,12 @@ define("MyApp.OnApplicationReady", [], function() {
                 $parameters.ClientVar_AppName = config.appName;
                 $parameters.ClientVar_Environment = config.environment;
                 
+                // Custom preferences
+                $parameters.ClientVar_TenantId = config.tenantId;
+                $parameters.ClientVar_TenantName = config.tenantName;
+                
                 console.log('[MyApp] Config initialized:', config);
+                console.log('[MyApp] Tenant ID:', config.tenantId);
             });
         }
     };
@@ -346,9 +411,30 @@ Check Xcode console for `[CSSInjector]` logs.
 - Android: `platforms/android/app/src/main/assets/www/cordova-build-config.json`
 - iOS: `platforms/ios/www/cordova-build-config.json`
 
+### Verify custom preferences in build output
+
+During build, you should see:
+```
+✨ Custom preferences:
+   - TENANT_ID = 1118
+   - TENANT_NAME = MyCompany
+
+✨ Custom preferences in build:
+   - tenantId: 1118
+   - tenantName: MyCompany
+```
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed version history.
+
+### v2.11.0 (2026-01-26) 🎉 CUSTOM PREFERENCES SUPPORT
+- **NEW**: Custom preferences injection (TENANT_ID, etc.)
+- **NEW**: Automatic detection of custom fields (TENANT_*, CUSTOM_*, CLIENT_*, APP_CUSTOM_*)
+- **NEW**: Dynamic field support - no hardcoding needed
+- **NEW**: CamelCase conversion for preference names
+- **DOCS**: Examples for custom preferences usage
+- **IMPROVED**: Enhanced build logging for custom fields
 
 ### v2.10.0 (2025-12-25) 🚀 NATIVE CONFIG INJECTION
 - **NEW**: Native config injection via Java/Swift plugins
