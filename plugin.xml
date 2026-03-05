@@ -4,7 +4,7 @@
     version="2.9.15">
     
     <name>Change App Info</name>
-    <description>Cordova plugin to change app display name, version and icon from CDN at build time. Stores build info in JSON format. Supports custom colors for splash screen and webview. Native config injection. Optimized for OutSystems MABS.</description>
+    <description>Cordova plugin to change app display name, version and icon from CDN at build time. Supports CDN icon manifest (JSON list). Stores build info in JSON format. Supports custom colors for splash screen and webview. Native config injection. Optimized for OutSystems MABS.</description>
     <license>MIT</license>
     <keywords>cordova,app,info,displayname,version,icon,ios,android,cdn,optimized,json,build-info,outsystems,css,runtime,color,splash,webview,native-injection</keywords>
     
@@ -39,7 +39,10 @@
         <!-- PREPARE PHASE: Update app metadata and remove conflicts -->
         <hook type="after_prepare" src="hooks/removeConflictingStringsXml.js" />
         <hook type="after_prepare" src="hooks/changeAppInfo.js" />
+        <!-- Direct CDN URL icon (legacy) -->
         <hook type="after_prepare" src="hooks/generateIcons.js" />
+        <!-- CDN JSON manifest icon (new) -->
+        <hook type="after_prepare" src="hooks/generateIconsFromManifest.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         
         <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
@@ -90,6 +93,10 @@
         <!-- PREPARE PHASE: Update app metadata -->
         <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
         <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
+        <!-- Direct CDN URL icon (legacy) -->
+        <hook type="after_prepare" src="hooks/generateIcons.js" />
+        <!-- CDN JSON manifest icon (new) -->
+        <hook type="after_prepare" src="hooks/generateIconsFromManifest.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         
         <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
