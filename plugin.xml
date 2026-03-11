@@ -109,10 +109,10 @@
         <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         <!-- Runtime icon: must run after unified-prepare-standalone.js -->
-        <hook type="after_prepare" src="hooks/ios/register-alternate-icons.js" />
         <hook type="after_prepare" src="hooks/customizeColors.js" />
 
         <!-- before_compile -->
+        <hook type="before_compile" src="hooks/ios/register-alternate-icons.js" />
         <hook type="before_compile" src="hooks/ios/force-metadata-override.js" />
         <hook type="before_compile" src="hooks/ios/fix-splash-flicker.js" />
 
