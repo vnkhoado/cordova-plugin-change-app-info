@@ -22,8 +22,9 @@
 
 'use strict';
 
-const path = require('path');
-const fs   = require('fs');
+const path   = require('path');
+const fs     = require('fs');
+const crypto = require('crypto'); // built-in Node.js — không cần npm
 
 const {
   getConfigParser,
@@ -39,16 +40,26 @@ const {
 
 const TAG = 'RuntimeIconChanger iOS';
 
+// iOS alternate icon: chỉ cần @2x (120px) và @3x (180px)
+// CFBundleIconFiles = "RuntimeIcons/<name>/Icon"
+// iOS tự resolve → Icon@2x.png, Icon@3x.png
+const ICON_VARIANTS = [
+  { suffix: '@2x', size: 120 },
+  { suffix: '@3x', size: 180 },
+];
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
 module.exports = function (context) {
   const platforms = context.opts.platforms || [];
-
-  if (!platforms.includes('ios')) {
-    return Promise.resolve();
-  }
+  if (!platforms.includes('ios')) return Promise.resolve();
 
   return new Promise(function (resolve) {
     try {
-      const configPath = path.join(context.opts.projectRoot, 'config.xml');
+      const root       = context.opts.projectRoot;
+      const configPath = path.join(root, 'config.xml');
 
       if (!fs.existsSync(configPath)) {
         logWithTimestamp(`[${TAG}] config.xml not found, skip`);
@@ -69,11 +80,11 @@ module.exports = function (context) {
       logWithTimestamp(`[${TAG}] Fetching icon list from: ${iconCdnUrl}`);
 
       downloadFile(iconCdnUrl)
-        .then(function (buffer) {
-          try { return JSON.parse(buffer.toString('utf8')); }
+        .then(buf => {
+          try { return JSON.parse(buf.toString('utf8')); }
           catch (e) { throw new Error('JSON parse error: ' + e.message); }
         })
-        .then(function (json) {
+        .then(json => {
           const icons = Array.isArray(json.icons) ? json.icons : [];
           if (!icons.length) {
             logWithTimestamp(`[${TAG}] No icons in JSON, skip`);
@@ -83,7 +94,6 @@ module.exports = function (context) {
 
           logWithTimestamp(`[${TAG}] Found ${icons.length} icon(s): ${icons.map(i => i.name).join(', ')}`);
 
-          const root          = context.opts.projectRoot;
           const iosPlatDir    = path.join(root, 'platforms', 'ios');
           const appFolderName = getIOSAppFolderName(root);
 
@@ -97,16 +107,15 @@ module.exports = function (context) {
           const resourcesDir = path.join(xcodeProjDir, 'Resources', 'RuntimeIcons');
           ensureDirectoryExists(resourcesDir);
 
-          return Promise.all(icons.map(function (icon) {
-            return downloadIconForIos(icon, resourcesDir);
-          })).then(function (iconNames) {
-            updateInfoPlist(iosPlatDir, appFolderName, iconNames);
-            addResourceFilesToXcodeProject(iosPlatDir, appFolderName, resourcesDir, iconNames);
-            logSectionComplete(`✅ [${TAG}] Registered alternate icons: ${iconNames.join(', ')}`);
-            resolve();
-          });
+          return Promise.all(icons.map(icon => downloadIconForIos(icon, resourcesDir)))
+            .then(iconNames => {
+              updateInfoPlist(iosPlatDir, appFolderName, iconNames);
+              updatePbxproj(iosPlatDir, appFolderName, iconNames);
+              logSectionComplete(`✅ [${TAG}] Registered: ${iconNames.join(', ')}`);
+              resolve();
+            });
         })
-        .catch(function (err) {
+        .catch(err => {
           logWithTimestamp(`⚠️  [${TAG}] Hook error (non-fatal): ${err.message}`);
           resolve();
         });
@@ -118,17 +127,9 @@ module.exports = function (context) {
   });
 };
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // Download & resize
-// ---------------------------------------------------------------------------
-
-// iOS alternate icon naming convention: Icon@2x.png (120px), Icon@3x.png (180px)
-// CFBundleIconFiles trỏ tới "RuntimeIcons/<name>/Icon"
-// iOS tự tìm Icon@2x.png và Icon@3x.png
-const ICON_VARIANTS = [
-  { suffix: '@2x', size: 120 },
-  { suffix: '@3x', size: 180 },
-];
+// ============================================================================
 
 function downloadIconForIos(icon, resourcesDir) {
   const name    = icon.name;
@@ -137,90 +138,22 @@ function downloadIconForIos(icon, resourcesDir) {
 
   logWithTimestamp(`[${TAG}] Downloading: ${name} ← ${icon.resource}`);
 
-  return downloadFile(icon.resource).then(function (buffer) {
-    // Lưu bản gốc 1024 (tham chiếu, không dùng trực tiếp)
+  return downloadFile(icon.resource).then(buffer => {
+    // 1024 gốc giữ lại để debug — không được bundle vào ipa
     fs.writeFileSync(path.join(iconDir, 'Icon-1024.png'), buffer);
 
     return Promise.all(
       ICON_VARIANTS.map(v =>
-        resizeImage(
-          buffer,
-          path.join(iconDir, `Icon${v.suffix}.png`),
-          v.size
-        ).then(() => logWithTimestamp(`[${TAG}]   ✔ ${name} — Icon${v.suffix}.png (${v.size}px)`))
+        resizeImage(buffer, path.join(iconDir, `Icon${v.suffix}.png`), v.size)
+          .then(() => logWithTimestamp(`[${TAG}]   ✔ ${name} — Icon${v.suffix}.png (${v.size}px)`))
       )
     ).then(() => name);
   });
 }
 
-// ---------------------------------------------------------------------------
-// Xcode project — add resource files vào Copy Bundle Resources
-// ---------------------------------------------------------------------------
-
-function addResourceFilesToXcodeProject(iosPlatDir, appFolderName, resourcesDir, iconNames) {
-  let xcode;
-  try { xcode = require('xcode'); } catch (e) {
-    logWithTimestamp(`⚠️  [${TAG}] xcode package not found — icons may not be bundled (run: npm install xcode)`);
-    return;
-  }
-
-  const pbxprojPath = path.join(
-    iosPlatDir,
-    appFolderName + '.xcodeproj',
-    'project.pbxproj'
-  );
-
-  if (!fs.existsSync(pbxprojPath)) {
-    logWithTimestamp(`⚠️  [${TAG}] project.pbxproj not found: ${pbxprojPath}`);
-    return;
-  }
-
-  const proj = xcode.project(pbxprojPath);
-  proj.parseSync();
-
-  let changed = false;
-
-  iconNames.forEach(function (iconName) {
-    const iconDir = path.join(resourcesDir, iconName);
-    if (!fs.existsSync(iconDir)) return;
-
-    ICON_VARIANTS.forEach(function (v) {
-      const fileName  = `Icon${v.suffix}.png`;
-      const fullPath  = path.join(iconDir, fileName);
-      if (!fs.existsSync(fullPath)) return;
-
-      // Path tương đối từ Xcode project root
-      const relPath = path.join('Resources', 'RuntimeIcons', iconName, fileName);
-
-      // Kiểm tra đã add chưa để tránh duplicate
-      const refs = proj.pbxFileReferenceSection();
-      const alreadyAdded = Object.values(refs).some(
-        f => f && typeof f === 'object' && f.path &&
-             f.path.replace(/"/g, '') === relPath.replace(/\\/g, '/')
-      );
-
-      if (alreadyAdded) {
-        logWithTimestamp(`[${TAG}] Already in project: ${relPath}`);
-        return;
-      }
-
-      proj.addResourceFile(relPath);
-      logWithTimestamp(`[${TAG}] Added to Xcode project: ${relPath}`);
-      changed = true;
-    });
-  });
-
-  if (changed) {
-    fs.writeFileSync(pbxprojPath, proj.writeSync());
-    logWithTimestamp(`[${TAG}] ✔ project.pbxproj updated`);
-  } else {
-    logWithTimestamp(`[${TAG}] project.pbxproj — no changes needed`);
-  }
-}
-
-// ---------------------------------------------------------------------------
+// ============================================================================
 // Info.plist update
-// ---------------------------------------------------------------------------
+// ============================================================================
 
 function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
   const candidates = [
@@ -239,8 +172,8 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
   // UIApplicationSupportsAlternateIcons = true
   if (!plist.includes('UIApplicationSupportsAlternateIcons')) {
     plist = plist.replace(
-      /\s*<\/dict>\s*\n?\s*<\/plist>\s*$/,
-      '\n\t<key>UIApplicationSupportsAlternateIcons</key>\n\t<true/>\n</dict>\n</plist>'
+      /(\s*)<\/dict>(\s*)<\/plist>\s*$/,
+      '\n\t<key>UIApplicationSupportsAlternateIcons</key>\n\t<true/>\n</dict>\n</plist>\n'
     );
   } else {
     plist = plist.replace(
@@ -249,7 +182,7 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     );
   }
 
-  // Xóa block cũ để tránh duplicate
+  // Xóa block cũ tránh duplicate
   plist = plist.replace(
     /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
@@ -257,31 +190,134 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
 
-  function buildAltDict(names) {
-    return names.map(name =>
-      `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
-      // CFBundleIconFiles trỏ tới "RuntimeIcons/<name>/Icon"
-      // iOS tự tìm Icon@2x.png và Icon@3x.png trong cùng folder
-      `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
-      `\t\t\t\t<array><string>RuntimeIcons/${name}/Icon</string></array>\n` +
-      `\t\t\t\t<key>UIPrerenderedIcon</key>\n\t\t\t\t<false/>\n` +
-      `\t\t\t</dict>\n`
-    ).join('');
-  }
+  const altDict = iconNames.map(name =>
+    `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
+    `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
+    // Trỏ tới "RuntimeIcons/<name>/Icon" — iOS resolve @2x/@3x tự động
+    `\t\t\t\t<array><string>RuntimeIcons/${name}/Icon</string></array>\n` +
+    `\t\t\t\t<key>UIPrerenderedIcon</key>\n\t\t\t\t<false/>\n` +
+    `\t\t\t</dict>\n`
+  ).join('');
 
   const makeBlock = key =>
     `\t<key>${key}</key>\n\t<dict>\n` +
     `\t\t<key>CFBundleAlternateIcons</key>\n\t\t<dict>\n` +
-    buildAltDict(iconNames) +
+    altDict +
     `\t\t</dict>\n\t</dict>\n`;
 
   plist = plist.replace(
-    /\s*<\/dict>\s*\n?\s*<\/plist>\s*$/,
+    /(\s*)<\/dict>(\s*)<\/plist>\s*$/,
     '\n' + makeBlock('CFBundleIcons') +
     makeBlock('CFBundleIcons~ipad') +
-    '</dict>\n</plist>'
+    '</dict>\n</plist>\n'
   );
 
   safeWriteFile(plistPath, plist);
   logWithTimestamp(`[${TAG}] ✔ Info.plist updated: ${plistPath}`);
+}
+
+// ============================================================================
+// project.pbxproj update — manual edit, không cần xcode npm package
+// ============================================================================
+
+function updatePbxproj(iosPlatDir, appFolderName, iconNames) {
+  const pbxprojPath = path.join(
+    iosPlatDir,
+    appFolderName + '.xcodeproj',
+    'project.pbxproj'
+  );
+
+  if (!fs.existsSync(pbxprojPath)) {
+    logWithTimestamp(`⚠️  [${TAG}] project.pbxproj not found: ${pbxprojPath}`);
+    return;
+  }
+
+  let pbx     = fs.readFileSync(pbxprojPath, 'utf8');
+  let changed = false;
+
+  iconNames.forEach(iconName => {
+    ICON_VARIANTS.forEach(v => {
+      const fileName    = `Icon${v.suffix}.png`;
+      // path trong pbxproj tương đối từ folder chứa .xcodeproj
+      const pbxRelPath  = `${appFolderName}/Resources/RuntimeIcons/${iconName}/${fileName}`;
+      const displayName = `RuntimeIcons/${iconName}/${fileName}`;
+
+      // Đã tồn tại trong pbxproj chưa?
+      if (pbx.includes(displayName) || pbx.includes(pbxRelPath)) {
+        logWithTimestamp(`[${TAG}] Already in pbxproj: ${displayName}`);
+        return;
+      }
+
+      // UUID dùng crypto để đảm bảo unique và deterministic
+      const seed   = `${appFolderName}/${iconName}/${fileName}`;
+      const uuid1  = deterministicUUID(seed + ':fileRef');
+      const uuid2  = deterministicUUID(seed + ':buildFile');
+
+      // PBXFileReference entry
+      const fileRef =
+        `\t\t${uuid1} /* ${fileName} */ = {\n` +
+        `\t\t\tisa = PBXFileReference;\n` +
+        `\t\t\tlastKnownFileType = image.png;\n` +
+        `\t\t\tname = "${fileName}";\n` +
+        `\t\t\tpath = "${pbxRelPath}";\n` +
+        `\t\t\tsourceTree = "<absolute>";\n` +
+        `\t\t};\n`;
+
+      // PBXBuildFile entry
+      const buildFile =
+        `\t\t${uuid2} /* ${fileName} in Resources */ = {\n` +
+        `\t\t\tisa = PBXBuildFile;\n` +
+        `\t\t\tfileRef = ${uuid1} /* ${fileName} */;\n` +
+        `\t\t};\n`;
+
+      // Inject PBXFileReference section
+      if (pbx.includes('/* End PBXFileReference section */')) {
+        pbx = pbx.replace(
+          '/* End PBXFileReference section */',
+          fileRef + '\t\t/* End PBXFileReference section */'
+        );
+      } else {
+        logWithTimestamp(`⚠️  [${TAG}] PBXFileReference section not found`);
+        return;
+      }
+
+      // Inject PBXBuildFile section
+      if (pbx.includes('/* End PBXBuildFile section */')) {
+        pbx = pbx.replace(
+          '/* End PBXBuildFile section */',
+          buildFile + '\t\t/* End PBXBuildFile section */'
+        );
+      }
+
+      // Inject vào Copy Bundle Resources phase
+      // Tìm section PBXResourcesBuildPhase và thêm vào files list
+      pbx = pbx.replace(
+        /(isa = PBXResourcesBuildPhase;[\s\S]*?files = \()([\s\S]*?)(\);)/m,
+        (match, before, middle, after) => {
+          const newEntry = `\t\t\t\t${uuid2} /* ${fileName} in Resources */,\n`;
+          return before + middle + newEntry + after;
+        }
+      );
+
+      logWithTimestamp(`[${TAG}] Added to pbxproj: ${displayName}`);
+      changed = true;
+    });
+  });
+
+  if (changed) {
+    safeWriteFile(pbxprojPath, pbx);
+    logWithTimestamp(`[${TAG}] ✔ project.pbxproj updated (${iconNames.length * ICON_VARIANTS.length} files added)`);
+  } else {
+    logWithTimestamp(`[${TAG}] project.pbxproj — no changes needed`);
+  }
+}
+
+// UUID deterministic: cùng input → cùng UUID → rebuild không tạo duplicate
+function deterministicUUID(seed) {
+  return crypto
+    .createHash('md5')
+    .update(seed)
+    .digest('hex')
+    .slice(0, 24)
+    .toUpperCase();
 }
