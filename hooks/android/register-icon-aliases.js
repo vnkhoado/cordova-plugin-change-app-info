@@ -20,9 +20,21 @@
 'use strict';
 
 const path = require('path');
-const fs = require('fs');
-const https = require('https');
-const http = require('http');
+const fs   = require('fs');
+
+const {
+  getConfigParser,
+  getAndroidPackageName,
+  ensureDirectoryExists,
+  safeWriteFile,
+  downloadFile,
+  resizeImage,
+  logWithTimestamp,
+  logSection,
+  logSectionComplete
+} = require('../utils');
+
+const TAG = 'RuntimeIconChanger Android';
 
 module.exports = function (context) {
   const platforms = context.opts.platforms || [];
@@ -31,177 +43,129 @@ module.exports = function (context) {
     return Promise.resolve();
   }
 
-  return new Promise((resolve) => {
+  return new Promise(function (resolve) {
     try {
-      const et = context.requireCordovaModule('elementtree');
       const configPath = path.join(context.opts.projectRoot, 'config.xml');
 
       if (!fs.existsSync(configPath)) {
-        console.log('[RuntimeIconChanger Android] config.xml not found, skip');
+        logWithTimestamp(`[${TAG}] config.xml not found, skip`);
         resolve();
         return;
       }
 
-      const doc = et.parse(fs.readFileSync(configPath, 'utf8'));
-      const iconCdnUrl = getPreference(doc, 'ICON_CDN_URL');
+      const config     = getConfigParser(context, configPath);
+      const iconCdnUrl = config.getPreference('ICON_CDN_URL');
 
       if (!iconCdnUrl) {
-        console.log('[RuntimeIconChanger Android] ICON_CDN_URL not set, skip');
+        logWithTimestamp(`[${TAG}] ICON_CDN_URL not set, skip`);
         resolve();
         return;
       }
 
-      fetchJson(iconCdnUrl)
+      logSection('RUNTIME ICON — Android');
+      logWithTimestamp(`[${TAG}] Fetching icon list from: ${iconCdnUrl}`);
+
+      downloadFile(iconCdnUrl)
+        .then(function (buffer) {
+          try {
+            return JSON.parse(buffer.toString('utf8'));
+          } catch (e) {
+            throw new Error('JSON parse error: ' + e.message);
+          }
+        })
         .then(function (json) {
           const icons = Array.isArray(json.icons) ? json.icons : [];
-          const runtimeIcons = icons.filter(function (icon) {
-            return icon && icon.name && icon.name !== 'default';
-          });
 
-          const appDir = path.join(
-            context.opts.projectRoot,
-            'platforms',
-            'android',
-            'app',
-            'src',
-            'main'
+          // default reuses ic_launcher từ CDN_ICON — không cần download lại
+          const runtimeIcons = icons.filter(i => i && i.name && i.name !== 'default');
+
+          logWithTimestamp(
+            `[${TAG}] ${runtimeIcons.length} runtime icon(s)` +
+            (runtimeIcons.length ? ': ' + runtimeIcons.map(i => i.name).join(', ') : '') +
+            ' (default reuses CDN_ICON)'
           );
+
+          const root   = context.opts.projectRoot;
+          const appDir = path.join(root, 'platforms', 'android', 'app', 'src', 'main');
           const resDir = path.join(appDir, 'res');
 
           const densities = [
-            { folder: 'mipmap-mdpi', size: 48 },
-            { folder: 'mipmap-hdpi', size: 72 },
-            { folder: 'mipmap-xhdpi', size: 96 },
-            { folder: 'mipmap-xxhdpi', size: 144 },
+            { folder: 'mipmap-mdpi',    size: 48  },
+            { folder: 'mipmap-hdpi',    size: 72  },
+            { folder: 'mipmap-xhdpi',   size: 96  },
+            { folder: 'mipmap-xxhdpi',  size: 144 },
             { folder: 'mipmap-xxxhdpi', size: 192 }
           ];
 
-          return Promise.all(runtimeIcons.map(function (icon) {
-            return downloadIconForAndroid(icon, resDir, densities);
-          })).then(function (iconInfos) {
-            injectAliases(appDir, iconInfos);
-            console.log(
-              '[RuntimeIconChanger Android] Activity aliases registered: default' +
+          return Promise.all(runtimeIcons.map(icon =>
+            downloadIconForAndroid(icon, resDir, densities)
+          )).then(function (iconInfos) {
+            // Package name: ưu tiên build.gradle, fallback manifest
+            const packageName = getAndroidPackageName(root) || getPackageFromManifest(appDir);
+            injectAliases(appDir, iconInfos, packageName);
+            logSectionComplete(
+              `✅ [${TAG}] Aliases registered: default (ic_launcher)` +
               (iconInfos.length ? ', ' + iconInfos.map(i => i.name).join(', ') : '')
             );
             resolve();
           });
         })
         .catch(function (err) {
-          console.warn('[RuntimeIconChanger Android] Hook error (non-fatal): ' + err.message);
+          logWithTimestamp(`⚠️  [${TAG}] Hook error (non-fatal): ${err.message}`);
           resolve();
         });
+
     } catch (err) {
-      console.warn('[RuntimeIconChanger Android] Hook error (non-fatal): ' + err.message);
+      logWithTimestamp(`⚠️  [${TAG}] Hook error (non-fatal): ${err.message}`);
       resolve();
     }
   });
 };
 
-function getPreference(doc, name) {
-  const all = doc.findall('preference').concat(
-    doc.findall('platform[@name="android"]/preference')
-  );
-  for (let i = 0; i < all.length; i++) {
-    if ((all[i].get('name') || '').toUpperCase() === name.toUpperCase()) {
-      return all[i].get('value') || '';
-    }
-  }
-  return '';
-}
+// ---------------------------------------------------------------------------
 
-function mkdirSafe(dir) {
-  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
-}
-
-function fetchJson(url) {
-  return new Promise(function (resolve, reject) {
-    const lib = url.startsWith('https') ? https : http;
-    const req = lib.get(url, { timeout: 15000 }, function (res) {
-      let data = '';
-      res.on('data', function (c) { data += c; });
-      res.on('end', function () {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error('JSON parse error: ' + e.message));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', function () {
-      req.destroy();
-      reject(new Error('Request timed out'));
-    });
-  });
-}
-
-function fetchBuffer(url) {
-  return new Promise(function (resolve, reject) {
-    const lib = url.startsWith('https') ? https : http;
-    const req = lib.get(url, { timeout: 30000 }, function (res) {
-      const chunks = [];
-      res.on('data', function (c) { chunks.push(c); });
-      res.on('end', function () { resolve(Buffer.concat(chunks)); });
-    });
-    req.on('error', reject);
-    req.on('timeout', function () {
-      req.destroy();
-      reject(new Error('Download timed out'));
-    });
-  });
+function getPackageFromManifest(appDir) {
+  const manifestPath = path.join(appDir, 'AndroidManifest.xml');
+  if (!fs.existsSync(manifestPath)) return '';
+  const match = fs.readFileSync(manifestPath, 'utf8').match(/package="([^"]+)"/);
+  return match ? match[1] : '';
 }
 
 function downloadIconForAndroid(icon, resDir, densities) {
   const name = icon.name;
-  const resourceUrl = icon.resource;
 
-  return fetchBuffer(resourceUrl).then(function (buffer) {
-    let Jimp;
-    try { Jimp = require('jimp'); } catch (_) { Jimp = null; }
+  logWithTimestamp(`[${TAG}] Downloading: ${name} ← ${icon.resource}`);
 
-    if (Jimp) {
-      return Jimp.read(buffer).then(function (img) {
-        return Promise.all(densities.map(function (d) {
-          const dir = path.join(resDir, d.folder);
-          mkdirSafe(dir);
-          return img.clone()
-            .resize(d.size, d.size)
-            .writeAsync(path.join(dir, 'ic_launcher_' + name + '.png'));
-        }));
-      }).then(function () {
-        return { name: name, mipmapName: 'ic_launcher_' + name };
-      });
-    }
-
-    densities.forEach(function (d) {
-      const dir = path.join(resDir, d.folder);
-      mkdirSafe(dir);
-      fs.writeFileSync(path.join(dir, 'ic_launcher_' + name + '.png'), buffer);
-    });
-
-    return { name: name, mipmapName: 'ic_launcher_' + name };
+  return downloadFile(icon.resource).then(function (buffer) {
+    return Promise.all(
+      densities.map(d => {
+        const dir     = path.join(resDir, d.folder);
+        const outFile = path.join(dir, `ic_launcher_${name}.png`);
+        ensureDirectoryExists(dir);
+        return resizeImage(buffer, outFile, d.size)
+          .then(() => logWithTimestamp(`[${TAG}]   ✔ ${name} — ${d.folder} (${d.size}px)`));
+      })
+    ).then(() => ({ name, mipmapName: `ic_launcher_${name}` }));
   });
 }
 
-function injectAliases(appDir, iconInfos) {
+function injectAliases(appDir, iconInfos, packageName) {
   const manifestPath = path.join(appDir, 'AndroidManifest.xml');
   if (!fs.existsSync(manifestPath)) {
-    console.warn('[RuntimeIconChanger Android] AndroidManifest.xml not found');
+    logWithTimestamp(`⚠️  [${TAG}] AndroidManifest.xml not found`);
     return;
   }
 
   let manifest = fs.readFileSync(manifestPath, 'utf8');
-  const pkgMatch = manifest.match(/package="([^"]+)"/);
-  const packageName = pkgMatch ? pkgMatch[1] : '';
 
+  // Xóa block cũ — idempotent
   manifest = manifest.replace(
-    /\n?\s*<!-- RuntimeIconChanger:start -->[\s\S]*?<!-- RuntimeIconChanger:end -->\n?/g,
-    ''
+    /\n?\s*<!-- RuntimeIconChanger:start -->[\s\S]*?<!-- RuntimeIconChanger:end -->\n?/g, ''
   );
 
   let block = '\n    <!-- RuntimeIconChanger:start -->';
 
+  // Alias mặc định dùng ic_launcher từ CDN_ICON
   block += `
     <activity-alias
         android:name="${packageName}.MainActivity_default"
@@ -216,10 +180,9 @@ function injectAliases(appDir, iconInfos) {
     </activity-alias>`;
 
   iconInfos.forEach(function (info) {
-    const alias = packageName + '.MainActivity_' + info.name;
     block += `
     <activity-alias
-        android:name="${alias}"
+        android:name="${packageName}.MainActivity_${info.name}"
         android:enabled="false"
         android:exported="true"
         android:icon="@mipmap/${info.mipmapName}"
@@ -234,5 +197,6 @@ function injectAliases(appDir, iconInfos) {
   block += '\n    <!-- RuntimeIconChanger:end -->';
 
   manifest = manifest.replace(/<\/application>/, block + '\n</application>');
-  fs.writeFileSync(manifestPath, manifest, 'utf8');
+  safeWriteFile(manifestPath, manifest);
+  logWithTimestamp(`[${TAG}] ✔ AndroidManifest.xml updated`);
 }
