@@ -23,10 +23,22 @@
 'use strict';
 
 const path = require('path');
-const fs = require('fs');
-const https = require('https');
-const http = require('http');
-const et = require('elementtree');
+const fs   = require('fs');
+
+const {
+  getConfigParser,
+  getIOSAppFolderName,
+  getInfoPlistPath,
+  ensureDirectoryExists,
+  safeWriteFile,
+  downloadFile,
+  resizeImage,
+  logWithTimestamp,
+  logSection,
+  logSectionComplete
+} = require('../utils');
+
+const TAG = 'RuntimeIconChanger iOS';
 
 module.exports = function (context) {
   const platforms = context.opts.platforms || [];
@@ -40,165 +52,117 @@ module.exports = function (context) {
       const configPath = path.join(context.opts.projectRoot, 'config.xml');
 
       if (!fs.existsSync(configPath)) {
-        console.log('[RuntimeIconChanger iOS] config.xml not found, skip');
+        logWithTimestamp(`[${TAG}] config.xml not found, skip`);
         resolve();
         return;
       }
 
-      const doc = et.parse(fs.readFileSync(configPath, 'utf8'));
-      const iconCdnUrl = getPreference(doc, 'ICON_CDN_URL');
+      const config     = getConfigParser(context, configPath);
+      const iconCdnUrl = config.getPreference('ICON_CDN_URL');
 
       if (!iconCdnUrl) {
-        console.log('[RuntimeIconChanger iOS] ICON_CDN_URL not set, skip');
+        logWithTimestamp(`[${TAG}] ICON_CDN_URL not set, skip`);
         resolve();
         return;
       }
 
-      console.log('[RuntimeIconChanger iOS] Fetching icon list from: ' + iconCdnUrl);
+      logSection('RUNTIME ICON — iOS');
+      logWithTimestamp(`[${TAG}] Fetching icon list from: ${iconCdnUrl}`);
 
-      fetchJson(iconCdnUrl)
+      downloadFile(iconCdnUrl)
+        .then(function (buffer) {
+          try {
+            return JSON.parse(buffer.toString('utf8'));
+          } catch (e) {
+            throw new Error('JSON parse error: ' + e.message);
+          }
+        })
         .then(function (json) {
           const icons = Array.isArray(json.icons) ? json.icons : [];
           if (!icons.length) {
-            console.log('[RuntimeIconChanger iOS] No icons in JSON, skip');
+            logWithTimestamp(`[${TAG}] No icons in JSON, skip`);
             resolve();
             return;
           }
 
-          const appName = getAppName(context);
-          const iosPlatDir = path.join(context.opts.projectRoot, 'platforms', 'ios');
-          const xcodeProjDir = path.join(iosPlatDir, appName);
+          logWithTimestamp(`[${TAG}] Found ${icons.length} icon(s): ${icons.map(i => i.name).join(', ')}`);
+
+          const root          = context.opts.projectRoot;
+          const iosPlatDir    = path.join(root, 'platforms', 'ios');
+          const appFolderName = getIOSAppFolderName(root);
+
+          if (!appFolderName) {
+            logWithTimestamp(`⚠️  [${TAG}] iOS app folder not found`);
+            resolve();
+            return;
+          }
+
+          const xcodeProjDir = path.join(iosPlatDir, appFolderName);
           const resourcesDir = path.join(xcodeProjDir, 'Resources', 'RuntimeIcons');
-          mkdirSafe(resourcesDir);
+          ensureDirectoryExists(resourcesDir);
 
           const iconSizes = [20, 29, 40, 58, 60, 76, 80, 87, 120, 152, 167, 180, 1024];
 
           return Promise.all(icons.map(function (icon) {
             return downloadIconForIos(icon, resourcesDir, iconSizes);
           })).then(function (iconNames) {
-            updateInfoPlist(xcodeProjDir, appName, iconNames);
-            console.log('[RuntimeIconChanger iOS] Registered alternate icons: ' + iconNames.join(', '));
+            updateInfoPlist(iosPlatDir, appFolderName, iconNames);
+            logSectionComplete(`✅ [${TAG}] Registered alternate icons: ${iconNames.join(', ')}`);
             resolve();
           });
         })
         .catch(function (err) {
-          console.warn('[RuntimeIconChanger iOS] Hook error (non-fatal): ' + err.message);
+          logWithTimestamp(`⚠️  [${TAG}] Hook error (non-fatal): ${err.message}`);
           resolve();
         });
 
     } catch (err) {
-      console.warn('[RuntimeIconChanger iOS] Hook error (non-fatal): ' + err.message);
+      logWithTimestamp(`⚠️  [${TAG}] Hook error (non-fatal): ${err.message}`);
       resolve();
     }
   });
 };
 
-function getPreference(doc, name) {
-  const all = doc.findall('preference').concat(
-    doc.findall('platform[@name="ios"]/preference')
-  );
-  for (let i = 0; i < all.length; i++) {
-    if ((all[i].get('name') || '').toUpperCase() === name.toUpperCase()) {
-      return all[i].get('value') || '';
-    }
-  }
-  return '';
-}
-
-function getAppName(context) {
-  const configPath = path.join(context.opts.projectRoot, 'config.xml');
-  const doc = et.parse(fs.readFileSync(configPath, 'utf8'));
-  return (doc.findtext('name') || 'App').trim();
-}
-
-function mkdirSafe(dir) {
-  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
-}
-
-function fetchJson(url) {
-  return new Promise(function (resolve, reject) {
-    const lib = url.startsWith('https') ? https : http;
-    const req = lib.get(url, { timeout: 15000 }, function (res) {
-      let data = '';
-      res.on('data', function (c) { data += c; });
-      res.on('end', function () {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error('JSON parse error: ' + e.message)); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', function () {
-      req.destroy();
-      reject(new Error('Request timed out'));
-    });
-  });
-}
-
-function fetchBuffer(url) {
-  return new Promise(function (resolve, reject) {
-    const lib = url.startsWith('https') ? https : http;
-    const req = lib.get(url, { timeout: 30000 }, function (res) {
-      const chunks = [];
-      res.on('data', function (c) { chunks.push(c); });
-      res.on('end', function () { resolve(Buffer.concat(chunks)); });
-    });
-    req.on('error', reject);
-    req.on('timeout', function () {
-      req.destroy();
-      reject(new Error('Download timed out'));
-    });
-  });
-}
+// ---------------------------------------------------------------------------
 
 function downloadIconForIos(icon, resourcesDir, sizes) {
-  const name = icon.name;
-  const resourceUrl = icon.resource;
-  const iconDir = path.join(resourcesDir, name);
-  mkdirSafe(iconDir);
+  const name     = icon.name;
+  const iconDir  = path.join(resourcesDir, name);
+  ensureDirectoryExists(iconDir);
 
-  return fetchBuffer(resourceUrl).then(function (buffer) {
+  logWithTimestamp(`[${TAG}] Downloading: ${name} ← ${icon.resource}`);
+
+  return downloadFile(icon.resource).then(function (buffer) {
+    // Lưu bản gốc 1024 (binary — dùng fs trực tiếp, không qua safeWriteFile utf8)
     fs.writeFileSync(path.join(iconDir, 'Icon-1024.png'), buffer);
+    logWithTimestamp(`[${TAG}] ✔ ${name} — 1024px saved`);
 
-    let Jimp;
-    try { Jimp = require('jimp'); } catch (_) { Jimp = null; }
-
-    if (Jimp) {
-      return Jimp.read(buffer).then(function (img) {
-        return Promise.all(
-          sizes.filter(function (s) { return s !== 1024; }).map(function (size) {
-            return img.clone()
-              .resize(size, size)
-              .writeAsync(path.join(iconDir, 'Icon-' + size + '.png'));
-          })
-        );
-      }).then(function () { return name; });
-    }
-
-    sizes.filter(function (s) { return s !== 1024; }).forEach(function (size) {
-      fs.copyFileSync(
-        path.join(iconDir, 'Icon-1024.png'),
-        path.join(iconDir, 'Icon-' + size + '.png')
-      );
-    });
-
-    return name;
+    return Promise.all(
+      sizes
+        .filter(s => s !== 1024)
+        .map(size =>
+          resizeImage(buffer, path.join(iconDir, `Icon-${size}.png`), size)
+            .then(() => logWithTimestamp(`[${TAG}]   ✔ ${name} — ${size}x${size}`))
+        )
+    ).then(() => name);
   });
 }
 
-function updateInfoPlist(xcodeProjDir, appName, iconNames) {
-  const candidates = [
-    path.join(xcodeProjDir, appName + '-Info.plist'),
-    path.join(xcodeProjDir, 'Info.plist')
-  ];
-  const plistPath = candidates.find(function (p) { return fs.existsSync(p); });
+function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
+  // Thử getInfoPlistPath từ utils trước, fallback sang Info.plist
+  let plistPath = getInfoPlistPath(iosPlatDir);
+  if (!plistPath || !fs.existsSync(plistPath)) {
+    plistPath = path.join(iosPlatDir, appFolderName, 'Info.plist');
+  }
 
-  if (!plistPath) {
-    console.warn('[RuntimeIconChanger iOS] Info.plist not found');
+  if (!plistPath || !fs.existsSync(plistPath)) {
+    logWithTimestamp(`⚠️  [${TAG}] Info.plist not found`);
     return;
   }
 
   let plist = fs.readFileSync(plistPath, 'utf8');
 
+  // UIApplicationSupportsAlternateIcons
   if (!plist.includes('UIApplicationSupportsAlternateIcons')) {
     plist = plist.replace(
       '</dict>\n</plist>',
@@ -211,56 +175,35 @@ function updateInfoPlist(xcodeProjDir, appName, iconNames) {
     );
   }
 
+  // Xóa block cũ để tránh duplicate
   plist = plist.replace(
-    /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g,
-    ''
+    /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
   plist = plist.replace(
-    /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g,
-    ''
+    /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
 
-  function buildAltIconsDict(names) {
-    let xml = '';
-    names.forEach(function (name) {
-      xml += '\t\t\t<key>' + name + '</key>\n';
-      xml += '\t\t\t<dict>\n';
-      xml += '\t\t\t\t<key>CFBundleIconFiles</key>\n';
-      xml += '\t\t\t\t<array>\n';
-      xml += '\t\t\t\t\t<string>RuntimeIcons/' + name + '/Icon</string>\n';
-      xml += '\t\t\t\t</array>\n';
-      xml += '\t\t\t\t<key>UIPrerenderedIcon</key>\n';
-      xml += '\t\t\t\t<false/>\n';
-      xml += '\t\t\t</dict>\n';
-    });
-    return xml;
+  function buildAltDict(names) {
+    return names.map(name =>
+      `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
+      `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
+      `\t\t\t\t<array><string>RuntimeIcons/${name}/Icon</string></array>\n` +
+      `\t\t\t\t<key>UIPrerenderedIcon</key>\n\t\t\t\t<false/>\n` +
+      `\t\t\t</dict>\n`
+    ).join('');
   }
 
-  const altIconsContent = buildAltIconsDict(iconNames);
-
-  const bundleIconsBlock =
-    '\t<key>CFBundleIcons</key>\n' +
-    '\t<dict>\n' +
-    '\t\t<key>CFBundleAlternateIcons</key>\n' +
-    '\t\t<dict>\n' +
-    altIconsContent +
-    '\t\t</dict>\n' +
-    '\t</dict>\n';
-
-  const bundleIconsIpadBlock =
-    '\t<key>CFBundleIcons~ipad</key>\n' +
-    '\t<dict>\n' +
-    '\t\t<key>CFBundleAlternateIcons</key>\n' +
-    '\t\t<dict>\n' +
-    altIconsContent +
-    '\t\t</dict>\n' +
-    '\t</dict>\n';
+  const makeBlock = (key) =>
+    `\t<key>${key}</key>\n\t<dict>\n` +
+    `\t\t<key>CFBundleAlternateIcons</key>\n\t\t<dict>\n` +
+    buildAltDict(iconNames) +
+    `\t\t</dict>\n\t</dict>\n`;
 
   plist = plist.replace(
     '</dict>\n</plist>',
-    bundleIconsBlock + bundleIconsIpadBlock + '</dict>\n</plist>'
+    makeBlock('CFBundleIcons') + makeBlock('CFBundleIcons~ipad') + '</dict>\n</plist>'
   );
 
-  fs.writeFileSync(plistPath, plist, 'utf8');
-  console.log('[RuntimeIconChanger iOS] Info.plist updated at: ' + plistPath);
+  safeWriteFile(plistPath, plist);
+  logWithTimestamp(`[${TAG}] ✔ Info.plist updated: ${plistPath}`);
 }
