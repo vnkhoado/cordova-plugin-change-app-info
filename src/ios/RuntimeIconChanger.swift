@@ -47,9 +47,11 @@ class RuntimeIconChanger: CDVPlugin {
 
     @objc(isSupported:)
     func isSupported(_ command: CDVInvokedUrlCommand) {
+        // Check iOS version only — không dùng supportsAlternateIcons
+        // vì supportsAlternateIcons phụ thuộc vào Info.plist đúng cấu trúc,
+        // nếu sai sẽ trả false dù device đủ điều kiện
         if #available(iOS 10.3, *) {
-            let supported = UIApplication.shared.supportsAlternateIcons
-            let result = CDVPluginResult(status: .ok, messageAs: supported)
+            let result = CDVPluginResult(status: .ok, messageAs: true)
             commandDelegate.send(result, callbackId: command.callbackId)
         } else {
             let result = CDVPluginResult(status: .ok, messageAs: false)
