@@ -47,15 +47,13 @@ class RuntimeIconChanger: CDVPlugin {
 
     @objc(isSupported:)
     func isSupported(_ command: CDVInvokedUrlCommand) {
-        // Check iOS version only — không dùng supportsAlternateIcons
-        // vì supportsAlternateIcons phụ thuộc vào Info.plist đúng cấu trúc,
-        // nếu sai sẽ trả false dù device đủ điều kiện
+        // Check iOS version only — KHÔNG dùng supportsAlternateIcons
+        // vì supportsAlternateIcons phụ thuộc Info.plist đúng cấu trúc CFBundleIcons,
+        // nếu hook chưa chạy đúng sẽ trả false dù device đủ điều kiện
         if #available(iOS 10.3, *) {
-            let result = CDVPluginResult(status: .ok, messageAs: true)
-            commandDelegate.send(result, callbackId: command.callbackId)
+            sendSuccess(true, callbackId: command.callbackId)
         } else {
-            let result = CDVPluginResult(status: .ok, messageAs: false)
-            commandDelegate.send(result, callbackId: command.callbackId)
+            sendSuccess(false, callbackId: command.callbackId)
         }
     }
 
@@ -86,52 +84,77 @@ class RuntimeIconChanger: CDVPlugin {
 
     @objc(changeIcon:)
     func changeIcon(_ command: CDVInvokedUrlCommand) {
+        guard #available(iOS 10.3, *) else {
+            sendError("Alternate icons require iOS 10.3+", callbackId: command.callbackId)
+            return
+        }
+
         guard let iconName = command.arguments.first as? String, !iconName.isEmpty else {
             sendError("iconName argument is required", callbackId: command.callbackId)
             return
         }
-        if #available(iOS 10.3, *) {
-            guard UIApplication.shared.supportsAlternateIcons else {
-                sendError("This app does not support alternate icons. Ensure UIApplicationSupportsAlternateIcons is set in Info.plist.",
-                          callbackId: command.callbackId)
-                return
-            }
-            resolveIconEntry(name: iconName, callbackId: command.callbackId) { [weak self] entry in
-                guard let self = self else { return }
-                // For the primary/default icon pass nil; for others pass the registered name
-                let alternateIconName: String? = (iconName == "default") ? nil : iconName
+
+        // FIX 1: Bỏ guard supportsAlternateIcons — check version đủ rồi
+        // FIX 2: Bỏ resolveIconEntry (CDN fetch) — icon đã bundle sẵn, không cần verify
+        // FIX 3: Strong reference tránh commandDelegate bị release trước completion
+        let delegate   = self.commandDelegate!
+        let callbackId = command.callbackId!
+
+        let alternateIconName: String? = (iconName == "default") ? nil : iconName
+
+        DispatchQueue.main.async {
+            UIApplication.shared.setAlternateIconName(alternateIconName) { err in
+                // FIX 4: Completion handler chạy trên bất kỳ thread nào
+                // → phải dispatch về main để gọi delegate an toàn
                 DispatchQueue.main.async {
-                    UIApplication.shared.setAlternateIconName(alternateIconName) { err in
-                        if let err = err {
-                            self.sendError("setAlternateIconName failed: " + err.localizedDescription,
-                                           callbackId: command.callbackId)
-                        } else {
-                            UserDefaults.standard.set(iconName, forKey: "RIC_currentIcon")
-                            self.sendSuccess("Icon changed to \(iconName)", callbackId: command.callbackId)
-                        }
+                    if let err = err {
+                        let result = CDVPluginResult(
+                            status: .error,
+                            messageAs: "setAlternateIconName failed: \(err.localizedDescription)"
+                        )
+                        delegate.send(result, callbackId: callbackId)
+                    } else {
+                        UserDefaults.standard.set(iconName, forKey: "RIC_currentIcon")
+                        let result = CDVPluginResult(
+                            status: .ok,
+                            messageAs: "Icon changed to \(iconName)"
+                        )
+                        delegate.send(result, callbackId: callbackId)
                     }
                 }
             }
-        } else {
-            sendError("Alternate icons require iOS 10.3+", callbackId: command.callbackId)
         }
     }
 
     @objc(resetToDefault:)
     func resetToDefault(_ command: CDVInvokedUrlCommand) {
-        if #available(iOS 10.3, *) {
-            DispatchQueue.main.async {
-                UIApplication.shared.setAlternateIconName(nil) { err in
+        guard #available(iOS 10.3, *) else {
+            sendError("Alternate icons require iOS 10.3+", callbackId: command.callbackId)
+            return
+        }
+
+        let delegate   = self.commandDelegate!
+        let callbackId = command.callbackId!
+
+        DispatchQueue.main.async {
+            UIApplication.shared.setAlternateIconName(nil) { err in
+                DispatchQueue.main.async {
                     if let err = err {
-                        self.sendError(err.localizedDescription, callbackId: command.callbackId)
+                        let result = CDVPluginResult(
+                            status: .error,
+                            messageAs: err.localizedDescription
+                        )
+                        delegate.send(result, callbackId: callbackId)
                     } else {
                         UserDefaults.standard.removeObject(forKey: "RIC_currentIcon")
-                        self.sendSuccess("Icon reset to default", callbackId: command.callbackId)
+                        let result = CDVPluginResult(
+                            status: .ok,
+                            messageAs: "Icon reset to default"
+                        )
+                        delegate.send(result, callbackId: callbackId)
                     }
                 }
             }
-        } else {
-            sendError("Alternate icons require iOS 10.3+", callbackId: command.callbackId)
         }
     }
 
@@ -142,44 +165,6 @@ class RuntimeIconChanger: CDVPlugin {
     }
 
     // MARK: - Private helpers
-
-    /**
-     * Resolve an icon entry from cache or CDN, then call completion on a BG thread.
-     * Non-fatal: sends error to Cordova if not found.
-     */
-    private func resolveIconEntry(name: String,
-                                  callbackId: String,
-                                  completion: @escaping ([String: String]) -> Void) {
-        let resolve = { [weak self] (icons: [[String: String]]) in
-            guard let self = self else { return }
-            if let entry = icons.first(where: { $0["name"] == name }) {
-                completion(entry)
-            } else {
-                self.sendError("Icon '\(name)' not found in CDN list.", callbackId: callbackId)
-            }
-        }
-
-        if !cachedIcons.isEmpty {
-            resolve(cachedIcons)
-            return
-        }
-
-        guard !cdnJsonUrl.isEmpty, let url = URL(string: cdnJsonUrl) else {
-            sendError("ICON_CDN_URL not configured.", callbackId: callbackId)
-            return
-        }
-
-        commandDelegate.run(inBackground: {
-            self.fetchIconList(url: url) { icons, error in
-                if let error = error {
-                    self.sendError(error, callbackId: callbackId)
-                    return
-                }
-                self.cachedIcons = icons ?? []
-                resolve(self.cachedIcons)
-            }
-        })
-    }
 
     private func fetchIconList(url: URL, completion: @escaping ([[String: String]]?, String?) -> Void) {
         session.dataTask(with: url) { data, _, error in
@@ -195,6 +180,12 @@ class RuntimeIconChanger: CDVPlugin {
             }
             completion(icons, nil)
         }.resume()
+    }
+
+    // Overload cho Bool (dùng trong isSupported)
+    private func sendSuccess(_ value: Bool, callbackId: String) {
+        let result = CDVPluginResult(status: .ok, messageAs: value)
+        commandDelegate.send(result, callbackId: callbackId)
     }
 
     private func sendSuccess(_ message: String, callbackId: String) {
