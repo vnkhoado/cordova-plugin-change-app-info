@@ -22,10 +22,11 @@
 
 'use strict';
 
-const path  = require('path');
-const fs    = require('fs');
+const path = require('path');
+const fs = require('fs');
 const https = require('https');
-const http  = require('http');
+const http = require('http');
+const et = require('elementtree');
 
 module.exports = function (context) {
   const platforms = context.opts.platforms || [];
@@ -36,7 +37,6 @@ module.exports = function (context) {
 
   return new Promise(function (resolve) {
     try {
-      const et         = context.requireCordovaModule('elementtree');
       const configPath = path.join(context.opts.projectRoot, 'config.xml');
 
       if (!fs.existsSync(configPath)) {
@@ -45,7 +45,7 @@ module.exports = function (context) {
         return;
       }
 
-      const doc        = et.parse(fs.readFileSync(configPath, 'utf8'));
+      const doc = et.parse(fs.readFileSync(configPath, 'utf8'));
       const iconCdnUrl = getPreference(doc, 'ICON_CDN_URL');
 
       if (!iconCdnUrl) {
@@ -65,8 +65,8 @@ module.exports = function (context) {
             return;
           }
 
-          const appName      = getAppName(context);
-          const iosPlatDir   = path.join(context.opts.projectRoot, 'platforms', 'ios');
+          const appName = getAppName(context);
+          const iosPlatDir = path.join(context.opts.projectRoot, 'platforms', 'ios');
           const xcodeProjDir = path.join(iosPlatDir, appName);
           const resourcesDir = path.join(xcodeProjDir, 'Resources', 'RuntimeIcons');
           mkdirSafe(resourcesDir);
@@ -93,10 +93,6 @@ module.exports = function (context) {
   });
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function getPreference(doc, name) {
   const all = doc.findall('preference').concat(
     doc.findall('platform[@name="ios"]/preference')
@@ -110,9 +106,8 @@ function getPreference(doc, name) {
 }
 
 function getAppName(context) {
-  const et         = context.requireCordovaModule('elementtree');
   const configPath = path.join(context.opts.projectRoot, 'config.xml');
-  const doc        = et.parse(fs.readFileSync(configPath, 'utf8'));
+  const doc = et.parse(fs.readFileSync(configPath, 'utf8'));
   return (doc.findtext('name') || 'App').trim();
 }
 
@@ -127,7 +122,7 @@ function fetchJson(url) {
       let data = '';
       res.on('data', function (c) { data += c; });
       res.on('end', function () {
-        try   { resolve(JSON.parse(data)); }
+        try { resolve(JSON.parse(data)); }
         catch (e) { reject(new Error('JSON parse error: ' + e.message)); }
       });
     });
@@ -156,9 +151,9 @@ function fetchBuffer(url) {
 }
 
 function downloadIconForIos(icon, resourcesDir, sizes) {
-  const name        = icon.name;
+  const name = icon.name;
   const resourceUrl = icon.resource;
-  const iconDir     = path.join(resourcesDir, name);
+  const iconDir = path.join(resourcesDir, name);
   mkdirSafe(iconDir);
 
   return fetchBuffer(resourceUrl).then(function (buffer) {
@@ -179,36 +174,17 @@ function downloadIconForIos(icon, resourcesDir, sizes) {
       }).then(function () { return name; });
     }
 
-    // Fallback: copy 1024 cho mọi size
     sizes.filter(function (s) { return s !== 1024; }).forEach(function (size) {
       fs.copyFileSync(
         path.join(iconDir, 'Icon-1024.png'),
         path.join(iconDir, 'Icon-' + size + '.png')
       );
     });
+
     return name;
   });
 }
 
-/**
- * Cập nhật Info.plist với cấu trúc đúng cho alternate icons:
- *
- *   <key>UIApplicationSupportsAlternateIcons</key><true/>
- *   <key>CFBundleIcons</key>
- *   <dict>
- *     <key>CFBundleAlternateIcons</key>
- *     <dict>
- *       <key>{name}</key>
- *       <dict>
- *         <key>CFBundleIconFiles</key>
- *         <array><string>RuntimeIcons/{name}/Icon</string></array>
- *         <key>UIPrerenderedIcon</key><false/>
- *       </dict>
- *     </dict>
- *   </dict>
- *   <key>CFBundleIcons~ipad</key>  ← cần thêm cho iPad
- *   <dict>...</dict>
- */
 function updateInfoPlist(xcodeProjDir, appName, iconNames) {
   const candidates = [
     path.join(xcodeProjDir, appName + '-Info.plist'),
@@ -217,27 +193,24 @@ function updateInfoPlist(xcodeProjDir, appName, iconNames) {
   const plistPath = candidates.find(function (p) { return fs.existsSync(p); });
 
   if (!plistPath) {
-    console.warn('[RuntimeIconChanger iOS] Info.plist not found — cannot register alternate icons');
+    console.warn('[RuntimeIconChanger iOS] Info.plist not found');
     return;
   }
 
   let plist = fs.readFileSync(plistPath, 'utf8');
 
-  // 1. Inject UIApplicationSupportsAlternateIcons = true (nếu chưa có)
   if (!plist.includes('UIApplicationSupportsAlternateIcons')) {
     plist = plist.replace(
       '</dict>\n</plist>',
       '\t<key>UIApplicationSupportsAlternateIcons</key>\n\t<true/>\n</dict>\n</plist>'
     );
   } else {
-    // Đảm bảo value là true
     plist = plist.replace(
       /<key>UIApplicationSupportsAlternateIcons<\/key>\s*<false\/>/,
       '<key>UIApplicationSupportsAlternateIcons</key>\n\t<true/>'
     );
   }
 
-  // 2. Xóa CFBundleIcons block cũ (nếu có) để tránh duplicate
   plist = plist.replace(
     /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g,
     ''
@@ -247,7 +220,6 @@ function updateInfoPlist(xcodeProjDir, appName, iconNames) {
     ''
   );
 
-  // 3. Build alternate icons XML block
   function buildAltIconsDict(names) {
     let xml = '';
     names.forEach(function (name) {
@@ -266,7 +238,6 @@ function updateInfoPlist(xcodeProjDir, appName, iconNames) {
 
   const altIconsContent = buildAltIconsDict(iconNames);
 
-  // CFBundleIcons (iPhone)
   const bundleIconsBlock =
     '\t<key>CFBundleIcons</key>\n' +
     '\t<dict>\n' +
@@ -276,7 +247,6 @@ function updateInfoPlist(xcodeProjDir, appName, iconNames) {
     '\t\t</dict>\n' +
     '\t</dict>\n';
 
-  // CFBundleIcons~ipad (iPad)
   const bundleIconsIpadBlock =
     '\t<key>CFBundleIcons~ipad</key>\n' +
     '\t<dict>\n' +
@@ -286,7 +256,6 @@ function updateInfoPlist(xcodeProjDir, appName, iconNames) {
     '\t\t</dict>\n' +
     '\t</dict>\n';
 
-  // 4. Inject trước </dict></plist>
   plist = plist.replace(
     '</dict>\n</plist>',
     bundleIconsBlock + bundleIconsIpadBlock + '</dict>\n</plist>'
