@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
     id="cordova-plugin-change-app-info"
-    version="2.9.15">
+    version="2.10.0">
     
     <name>Change App Info</name>
-    <description>Cordova plugin to change app display name, version and icon from CDN at build time. Stores build info in JSON format. Supports custom colors for splash screen and webview. Native config injection. Optimized for OutSystems MABS.</description>
+    <description>Cordova plugin to change app display name, version and icon from CDN at build time and runtime. Stores build info in JSON format. Supports custom colors for splash screen and webview. Native config injection. Optimized for OutSystems MABS.</description>
     <license>MIT</license>
-    <keywords>cordova,app,info,displayname,version,icon,ios,android,cdn,optimized,json,build-info,outsystems,css,runtime,color,splash,webview,native-injection</keywords>
+    <keywords>cordova,app,info,displayname,version,icon,ios,android,cdn,optimized,json,build-info,outsystems,css,runtime,color,splash,webview,native-injection,runtime-icon</keywords>
     
     <author>vnkhoado</author>
     <repo>https://github.com/vnkhoado/cordova-plugin-change-app-info.git</repo>
@@ -14,6 +14,30 @@
     <engines>
         <engine name="cordova" version=">=9.0.0" />
     </engines>
+
+    <!-- =====================================================================
+         RUNTIME ICON CHANGER CONFIGURATION
+
+         Add this preference to your config.xml to enable runtime icon updates:
+
+         <preference name="ICON_CDN_URL"
+             value="https://cdn.example.com/icons/icon-list.json" />
+
+         The JSON file must have this structure:
+         {
+           "icons": [
+             { "name": "default",   "resource": "https://cdn.example.com/icons/default.png" },
+             { "name": "christmas", "resource": "https://cdn.example.com/icons/christmas.png" }
+           ]
+         }
+
+         All PNG images must be 1024x1024 pixels.
+         ===================================================================== -->
+
+    <!-- Shared JS interface -->
+    <js-module src="www/RuntimeIconChanger.js" name="RuntimeIconChanger">
+        <clobbers target="cordova.plugins.RuntimeIconChanger" />
+    </js-module>
     
     <!-- Android Platform -->
     <platform name="android">
@@ -23,9 +47,18 @@
                 <param name="android-package" value="com.vnkhoado.cordova.changeappinfo.CSSInjector" />
                 <param name="onload" value="true" />
             </feature>
+            <!-- RuntimeIconChanger feature -->
+            <feature name="RuntimeIconChanger">
+                <param name="android-package" value="com.vnkhoado.cordova.changeappinfo.RuntimeIconChanger" />
+            </feature>
         </config-file>
         
+        <!-- Pass ICON_CDN_URL preference to native -->
+        <config-file target="res/xml/config.xml" parent="/widget/preference[@name='ICON_CDN_URL']">
+        </config-file>
+
         <source-file src="src/android/CSSInjector.java" target-dir="src/com/vnkhoado/cordova/changeappinfo" />
+        <source-file src="src/android/RuntimeIconChanger.java" target-dir="src/com/vnkhoado/cordova/changeappinfo" />
         
         <!-- CLEANUP PHASE: Prepare and backup configs -->
         <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
@@ -41,6 +74,9 @@
         <hook type="after_prepare" src="hooks/changeAppInfo.js" />
         <hook type="after_prepare" src="hooks/generateIcons.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
+        
+        <!-- RUNTIME ICON: Register activity aliases & mipmap drawables from CDN -->
+        <hook type="after_prepare" src="hooks/android/register-icon-aliases.js" />
         
         <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
         <hook type="after_prepare" src="hooks/customizeColors.js" />
@@ -73,10 +109,15 @@
                 <param name="ios-package" value="CSSInjector" />
                 <param name="onload" value="true" />
             </feature>
+            <!-- RuntimeIconChanger feature -->
+            <feature name="RuntimeIconChanger">
+                <param name="ios-package" value="RuntimeIconChanger" />
+            </feature>
         </config-file>
         
-        <!-- Swift source file -->
+        <!-- Swift source files -->
         <source-file src="src/ios/CSSInjector.swift" />
+        <source-file src="src/ios/RuntimeIconChanger.swift" />
         
         <!-- Framework dependencies -->
         <framework src="WebKit.framework" />
@@ -91,6 +132,9 @@
         <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
         <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
+        
+        <!-- RUNTIME ICON: Download icons from CDN & register in Info.plist -->
+        <hook type="after_prepare" src="hooks/ios/register-alternate-icons.js" />
         
         <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
         <hook type="after_prepare" src="hooks/customizeColors.js" />
