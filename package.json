@@ -1,6 +1,6 @@
 {
   "name": "cordova-plugin-change-app-info",
-  "version": "2.9.11",
+  "version": "2.10.0",
   "description": "Cordova plugin to change app info with iOS optimization, gradient splash screens, and JSON config storage",
   "main": "index.js",
   "scripts": {
@@ -35,7 +35,9 @@
     "url": "https://github.com/vnkhoado/cordova-plugin-change-app-info/issues"
   },
   "homepage": "https://github.com/vnkhoado/cordova-plugin-change-app-info#readme",
-  "dependencies": {},
+  "dependencies": {
+    "elementtree": "^0.1.7"
+  },
   "peerDependencies": {
     "sharp": "^0.32.0 || ^0.33.0",
     "jimp": "^0.22.0"
@@ -58,6 +60,7 @@
   },
   "_comment": {
     "dependencies": "Build-time Node.js dependencies",
+    "elementtree": "XML parser for config.xml — required by Cordova hooks (replaces requireCordovaModule)",
     "sharp": "Fast image processing for icons and gradient splash generation (RECOMMENDED)",
     "jimp": "Fallback image processor (pure JS) for icons and gradients",
     "config-storage": "Uses JSON files instead of sqlite - works on all cloud builds",
@@ -65,6 +68,7 @@
     "gradient-support": "CSS gradient support for native splash screens on Android and iOS",
     "usage": "Add SPLASH_GRADIENT preference to config.xml with linear-gradient CSS value",
     "note": "No need to manually install - auto-install-deps.js handles everything during build",
-    "removed-in-2.9.11": "Removed sqlite3 and better-sqlite3 - using JSON config storage instead (works everywhere)"
+    "removed-in-2.9.11": "Removed sqlite3 and better-sqlite3 - using JSON config storage instead (works everywhere)",
+    "changed-in-2.10.0": "Added elementtree dependency; hooks now use require() instead of requireCordovaModule() for MABS compatibility; runtime icon hooks use native Promise and manual pbxproj edit"
   }
 }
