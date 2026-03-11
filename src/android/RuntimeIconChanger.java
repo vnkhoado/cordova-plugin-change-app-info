@@ -8,6 +8,7 @@ import android.util.Log;
 
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
+import org.apache.cordova.PluginResult;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -18,6 +19,7 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -44,8 +46,9 @@ public class RuntimeIconChanger extends CordovaPlugin {
     private static final int    TIMEOUT  = 15_000; // ms
 
     private String cdnJsonUrl = "";
-    // Simple in-memory cache — cleared when plugin is destroyed
-    private final List<JSONObject> cachedIcons = new ArrayList<>();
+
+    // FIX 4: Thread-safe list
+    private final List<JSONObject> cachedIcons = Collections.synchronizedList(new ArrayList<>());
 
     // MARK: - execute() dispatch
 
@@ -57,7 +60,8 @@ public class RuntimeIconChanger extends CordovaPlugin {
 
         switch (action) {
             case "isSupported":
-                cb.success(true);         // always true on Android API 21+
+                // FIX 1: dùng PluginResult thay cb.success(boolean)
+                cb.sendPluginResult(new PluginResult(PluginResult.Status.OK, true));
                 return true;
 
             case "getIconList":
@@ -110,21 +114,20 @@ public class RuntimeIconChanger extends CordovaPlugin {
             cb.error("iconName must be a non-empty string");
             return;
         }
+
         cordova.getThreadPool().execute(() -> {
             try {
-                // Validate icon exists in CDN list (unless switching to 'default')
-                if (!"default".equals(iconName)) {
-                    List<JSONObject> icons = cachedIcons.isEmpty() ? fetchIconList() : cachedIcons;
-                    if (cachedIcons.isEmpty()) {
+                // FIX 2 + 3: Luôn load cache trước khi switch
+                // để switchAlias biết đủ danh sách alias cần disable
+                // Không validate icon name — alias đã bundle sẵn, CDN chỉ dùng cho list
+                if (cachedIcons.isEmpty() && !cdnJsonUrl.isEmpty()) {
+                    try {
+                        List<JSONObject> icons = fetchIconList();
                         cachedIcons.addAll(icons);
-                    }
-                    boolean found = false;
-                    for (JSONObject icon : icons) {
-                        if (iconName.equals(icon.optString("name"))) { found = true; break; }
-                    }
-                    if (!found) {
-                        cb.error("Icon '" + iconName + "' not found in CDN list.");
-                        return;
+                    } catch (Exception e) {
+                        // Non-fatal: CDN down → chỉ biết alias default
+                        // switchAlias vẫn chạy với list không đầy đủ
+                        Log.w(TAG, "Could not fetch CDN list (non-fatal): " + e.getMessage());
                     }
                 }
 
@@ -139,31 +142,71 @@ public class RuntimeIconChanger extends CordovaPlugin {
     }
 
     private void getCurrentIcon(final CallbackContext cb) {
-        cb.success(getPrefs().getString(PREF_KEY, "default"));
+        // FIX 5: Verify từ PackageManager, SharedPreferences chỉ là fallback
+        try {
+            Context ctx = cordova.getActivity().getApplicationContext();
+            PackageManager pm = ctx.getPackageManager();
+            String pkg = ctx.getPackageName();
+
+            // Ưu tiên check alias default trước
+            ComponentName defaultCn = new ComponentName(pkg, pkg + ".MainActivity_default");
+            int defaultState = pm.getComponentEnabledSetting(defaultCn);
+            if (defaultState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
+                cb.success("default");
+                return;
+            }
+
+            // Tìm alias đang enabled trong cachedIcons
+            synchronized (cachedIcons) {
+                for (JSONObject icon : cachedIcons) {
+                    String name = icon.optString("name", "");
+                    if (name.isEmpty() || "default".equals(name)) continue;
+                    ComponentName cn = new ComponentName(pkg, pkg + ".MainActivity_" + name);
+                    int state = pm.getComponentEnabledSetting(cn);
+                    if (state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
+                        cb.success(name);
+                        return;
+                    }
+                }
+            }
+
+            // Fallback về SharedPreferences
+            cb.success(getPrefs().getString(PREF_KEY, "default"));
+
+        } catch (Exception e) {
+            // Fallback an toàn
+            cb.success(getPrefs().getString(PREF_KEY, "default"));
+        }
     }
 
     // MARK: - Package Manager alias switching
 
     /**
-     * Enable the activity-alias for targetName, disable all others.
-     * Aliases were injected into AndroidManifest by the build hook.
+     * Enable alias cho targetName, disable tất cả alias còn lại.
+     * Aliases đã được inject vào AndroidManifest bởi build hook.
      */
     private void switchAlias(String targetName) {
-        Context ctx     = cordova.getActivity().getApplicationContext();
+        Context ctx       = cordova.getActivity().getApplicationContext();
         PackageManager pm = ctx.getPackageManager();
-        String pkg      = ctx.getPackageName();
+        String pkg        = ctx.getPackageName();
 
-        // Collect all known alias names
+        // Build danh sách đầy đủ từ cache
         List<String> aliases = new ArrayList<>();
         aliases.add(pkg + ".MainActivity_default");
-        for (JSONObject icon : cachedIcons) {
-            String n = icon.optString("name", "");
-            if (!n.isEmpty() && !"default".equals(n)) {
-                aliases.add(pkg + ".MainActivity_" + n);
+        synchronized (cachedIcons) {
+            for (JSONObject icon : cachedIcons) {
+                String n = icon.optString("name", "");
+                if (!n.isEmpty() && !"default".equals(n)) {
+                    aliases.add(pkg + ".MainActivity_" + n);
+                }
             }
         }
 
+        // Nếu target không có trong list → thêm vào để đảm bảo được enable
         String targetAlias = pkg + ".MainActivity_" + targetName;
+        if (!aliases.contains(targetAlias)) {
+            aliases.add(targetAlias);
+        }
 
         for (String alias : aliases) {
             int state = alias.equals(targetAlias)
@@ -175,8 +218,8 @@ public class RuntimeIconChanger extends CordovaPlugin {
                         state,
                         PackageManager.DONT_KILL_APP);
             } catch (SecurityException se) {
-                // Alias not declared in manifest — skip silently
-                Log.w(TAG, "Alias not found or not accessible: " + alias);
+                // Alias chưa được declare trong manifest — bỏ qua
+                Log.w(TAG, "Alias not found/accessible: " + alias);
             }
         }
     }
@@ -220,7 +263,9 @@ public class RuntimeIconChanger extends CordovaPlugin {
 
     private JSONArray listToJsonArray(List<JSONObject> list) {
         JSONArray arr = new JSONArray();
-        for (JSONObject o : list) arr.put(o);
+        synchronized (list) {
+            for (JSONObject o : list) arr.put(o);
+        }
         return arr;
     }
 
