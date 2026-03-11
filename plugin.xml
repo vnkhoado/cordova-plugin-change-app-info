@@ -2,154 +2,144 @@
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
     id="cordova-plugin-change-app-info"
     version="2.10.0">
-    
+
     <name>Change App Info</name>
-    <description>Cordova plugin to change app display name, version and icon from CDN at build time and runtime. Stores build info in JSON format. Supports custom colors for splash screen and webview. Native config injection. Optimized for OutSystems MABS.</description>
+    <description>Cordova plugin to change app display name, version and icon from CDN at build time and runtime. Supports runtime icon switching (iOS 10.3+ / Android 5+). Optimised for OutSystems MABS 9+.</description>
     <license>MIT</license>
-    <keywords>cordova,app,info,displayname,version,icon,ios,android,cdn,optimized,json,build-info,outsystems,css,runtime,color,splash,webview,native-injection,runtime-icon</keywords>
-    
+    <keywords>cordova,app,info,displayname,version,icon,ios,android,cdn,json,runtime,outsystems,mabs,runtime-icon</keywords>
+
     <author>vnkhoado</author>
     <repo>https://github.com/vnkhoado/cordova-plugin-change-app-info.git</repo>
-    
+
     <engines>
         <engine name="cordova" version=">=9.0.0" />
     </engines>
 
-    <!-- =====================================================================
-         RUNTIME ICON CHANGER CONFIGURATION
+    <!--
+    ======================================================================
+     RUNTIME ICON CHANGER — OUTSYSTEMS / MABS CONFIGURATION
 
-         Add this preference to your config.xml to enable runtime icon updates:
+     In OutSystems, add to Extensibility Configurations:
+     {
+       "preferences": {
+         "global": [
+           { "name": "ICON_CDN_URL",
+             "value": "https://cdn.example.com/icons/icon-list.json" }
+         ]
+       }
+     }
 
-         <preference name="ICON_CDN_URL"
-             value="https://cdn.example.com/icons/icon-list.json" />
+     For plain Cordova, add to config.xml:
+     <preference name="ICON_CDN_URL"
+         value="https://cdn.example.com/icons/icon-list.json" />
 
-         The JSON file must have this structure:
-         {
-           "icons": [
-             { "name": "default",   "resource": "https://cdn.example.com/icons/default.png" },
-             { "name": "christmas", "resource": "https://cdn.example.com/icons/christmas.png" }
-           ]
-         }
+     CDN JSON format (all PNGs must be 1024x1024, CORS-enabled):
+     {
+       "icons": [
+         { "name": "default",   "resource": "https://..." },
+         { "name": "christmas", "resource": "https://..." }
+       ]
+     }
+    ======================================================================
+    -->
 
-         All PNG images must be 1024x1024 pixels.
-         ===================================================================== -->
-
-    <!-- Shared JS interface -->
+    <!-- Shared JS API -->
     <js-module src="www/RuntimeIconChanger.js" name="RuntimeIconChanger">
         <clobbers target="cordova.plugins.RuntimeIconChanger" />
     </js-module>
-    
-    <!-- Android Platform -->
+
+    <!-- ================================================================
+         ANDROID
+    ================================================================ -->
     <platform name="android">
-        <!-- Native CSS Injector & Config Injector -->
+
         <config-file target="res/xml/config.xml" parent="/*">
             <feature name="CSSInjector">
                 <param name="android-package" value="com.vnkhoado.cordova.changeappinfo.CSSInjector" />
                 <param name="onload" value="true" />
             </feature>
-            <!-- RuntimeIconChanger feature -->
             <feature name="RuntimeIconChanger">
                 <param name="android-package" value="com.vnkhoado.cordova.changeappinfo.RuntimeIconChanger" />
             </feature>
         </config-file>
-        
-        <!-- Pass ICON_CDN_URL preference to native -->
-        <config-file target="res/xml/config.xml" parent="/widget/preference[@name='ICON_CDN_URL']">
-        </config-file>
 
-        <source-file src="src/android/CSSInjector.java" target-dir="src/com/vnkhoado/cordova/changeappinfo" />
-        <source-file src="src/android/RuntimeIconChanger.java" target-dir="src/com/vnkhoado/cordova/changeappinfo" />
-        
-        <!-- CLEANUP PHASE: Prepare and backup configs -->
+        <source-file src="src/android/CSSInjector.java"
+            target-dir="src/com/vnkhoado/cordova/changeappinfo" />
+        <source-file src="src/android/RuntimeIconChanger.java"
+            target-dir="src/com/vnkhoado/cordova/changeappinfo" />
+
+        <!-- Build hooks (order matters) -->
         <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
         <hook type="before_prepare" src="hooks/scripts/auto-install-deps.js" />
         <hook type="before_prepare" src="hooks/backupAppInfo.js" />
-        
-        <!-- AGGRESSIVE REPLACEMENT PHASE (FIRST): Global color replacement (ALL formats) -->
-        <hook type="after_prepare" src="hooks/android/aggressive-color-replace.js" />
-        <hook type="after_prepare" src="hooks/update-splash-theme-color.js" />
-        
-        <!-- PREPARE PHASE: Update app metadata and remove conflicts -->
-        <hook type="after_prepare" src="hooks/removeConflictingStringsXml.js" />
-        <hook type="after_prepare" src="hooks/changeAppInfo.js" />
-        <hook type="after_prepare" src="hooks/generateIcons.js" />
-        <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
-        
-        <!-- RUNTIME ICON: Register activity aliases & mipmap drawables from CDN -->
-        <hook type="after_prepare" src="hooks/android/register-icon-aliases.js" />
-        
-        <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
-        <hook type="after_prepare" src="hooks/customizeColors.js" />
-        <hook type="after_prepare" src="hooks/customizeWebview.js" />
-        
+
+        <hook type="after_prepare"  src="hooks/android/aggressive-color-replace.js" />
+        <hook type="after_prepare"  src="hooks/update-splash-theme-color.js" />
+        <hook type="after_prepare"  src="hooks/removeConflictingStringsXml.js" />
+        <hook type="after_prepare"  src="hooks/changeAppInfo.js" />
+        <hook type="after_prepare"  src="hooks/generateIcons.js" />
+        <hook type="after_prepare"  src="hooks/injectBuildInfo.js" />
+        <!-- Runtime icon: must run after generateIcons.js -->
+        <hook type="after_prepare"  src="hooks/android/register-icon-aliases.js" />
+        <hook type="after_prepare"  src="hooks/customizeColors.js" />
+        <hook type="after_prepare"  src="hooks/customizeWebview.js" />
+
         <hook type="before_compile" src="hooks/forceOverrideSplashColor.js" />
         <hook type="before_compile" src="hooks/forceOverrideNativeColors.js" />
         <hook type="before_compile" src="hooks/scanAndReplaceColor.js" />
         <hook type="before_compile" src="hooks/native-gradient-splash.js" />
-        
-        <!-- Fix Android splash color flicker at final phase -->
         <hook type="before_compile" src="hooks/android/fix-splash-flicker.js" />
-        
-        <!-- Fix red/white flash after splash screen -->
         <hook type="before_compile" src="hooks/android/fix-red-flash.js" />
-        
-        <hook type="post_compile" src="hooks/forceMBASSplashColor.js" />
-        <hook type="after_build" src="hooks/sendBuildSuccess.js" />
-        <hook type="after_prepare" src="hooks/android/update-android-small-icon.js"/>
+
+        <hook type="post_compile"   src="hooks/forceMBASSplashColor.js" />
+        <hook type="after_build"    src="hooks/sendBuildSuccess.js" />
+        <hook type="after_prepare"  src="hooks/android/update-android-small-icon.js" />
     </platform>
-    
-    <!-- iOS Platform -->
+
+    <!-- ================================================================
+         iOS
+    ================================================================ -->
     <platform name="ios">
-        <!-- Swift Support Dependency (REQUIRED for CSSInjector.swift) -->
-        <dependency id="cordova-plugin-add-swift-support" version="2.0.2"/>
-        
-        <!-- Native CSS Injector & Config Injector -->
+
+        <dependency id="cordova-plugin-add-swift-support" version="2.0.2" />
+
         <config-file target="config.xml" parent="/*">
             <feature name="CSSInjector">
                 <param name="ios-package" value="CSSInjector" />
                 <param name="onload" value="true" />
             </feature>
-            <!-- RuntimeIconChanger feature -->
             <feature name="RuntimeIconChanger">
                 <param name="ios-package" value="RuntimeIconChanger" />
             </feature>
         </config-file>
-        
-        <!-- Swift source files -->
+
         <source-file src="src/ios/CSSInjector.swift" />
         <source-file src="src/ios/RuntimeIconChanger.swift" />
-        
-        <!-- Framework dependencies -->
+
         <framework src="WebKit.framework" />
-        
-        <!-- CLEANUP PHASE: Prepare and backup configs -->
+
+        <!-- Build hooks -->
         <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
         <hook type="before_prepare" src="hooks/scripts/auto-install-deps.js" />
         <hook type="before_prepare" src="hooks/backupAppInfo.js" />
         <hook type="before_prepare" src="hooks/ios-cache-clear.js" />
-        
-        <!-- PREPARE PHASE: Update app metadata -->
-        <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
-        <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
-        <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
-        
-        <!-- RUNTIME ICON: Download icons from CDN & register in Info.plist -->
-        <hook type="after_prepare" src="hooks/ios/register-alternate-icons.js" />
-        
-        <!-- CUSTOMIZE PHASE: Update colors (unified hook) -->
-        <hook type="after_prepare" src="hooks/customizeColors.js" />
-        
-        <!-- COMPILE PHASE: Force override metadata & fix splash flicker -->
+
+        <hook type="after_prepare"  src="hooks/ios/unified-prepare-standalone.js" />
+        <hook type="after_prepare"  src="hooks/ios/inject-gradient-splash.js" />
+        <hook type="after_prepare"  src="hooks/injectBuildInfo.js" />
+        <!-- Runtime icon: must run after unified-prepare-standalone.js -->
+        <hook type="after_prepare"  src="hooks/ios/register-alternate-icons.js" />
+        <hook type="after_prepare"  src="hooks/customizeColors.js" />
+
         <hook type="before_compile" src="hooks/ios/force-metadata-override.js" />
         <hook type="before_compile" src="hooks/ios/fix-splash-flicker.js" />
-        
-        <!-- BUILD PHASE: Build and send success -->
-        <hook type="before_build" src="hooks/ios/unified-build.js" />
-        <hook type="after_build" src="hooks/sendBuildSuccess.js" />
-        
-        <!-- iOS Configuration -->
+
+        <hook type="before_build"   src="hooks/ios/unified-build.js" />
+        <hook type="after_build"    src="hooks/sendBuildSuccess.js" />
+
         <config-file target="*-Info.plist" parent="CFBundleIconName">
             <string>AppIcon</string>
         </config-file>
     </platform>
+
 </plugin>

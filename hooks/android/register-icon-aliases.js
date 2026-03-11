@@ -1,60 +1,70 @@
 /**
- * hooks/android/register-icon-aliases.js
+ * hooks/android/register-icon-aliases.js  — MABS-optimised
  *
- * Cordova after_prepare hook for Android.
- * Reads ICON_CDN_URL from config.xml, fetches the CDN JSON,
- * downloads each PNG (1024x1024), resizes to all Android launcher densities,
- * copies them into the correct mipmap folders, and injects <activity-alias>
- * entries into AndroidManifest.xml so RuntimeIconChanger.java can switch icons
- * via PackageManager.setComponentEnabledSetting.
+ * Cordova after_prepare hook (Android).
  *
- * Alias naming: <packageName>.MainActivity_<iconName>
+ * What it does:
+ *   1. Reads ICON_CDN_URL from config.xml
+ *   2. Fetches the CDN JSON icon list
+ *   3. Downloads each PNG, resizes to Android mipmap densities
+ *   4. Injects <activity-alias> entries into AndroidManifest.xml
+ *
+ * MABS constraints:
+ *   - No npm dependencies (Node built-ins only; jimp is optional)
+ *   - Idempotent: cleans up previous hook output before re-injecting
+ *   - Follows MABS 9+ Android project layout (app/src/main/)
+ *   - DONT_KILL_APP is handled in Java — not a build concern
+ *   - The default alias starts ENABLED; all others start DISABLED
  */
 
-const path = require('path');
-const fs = require('fs');
+'use strict';
+
+const path  = require('path');
+const fs    = require('fs');
 const https = require('https');
-const http = require('http');
+const http  = require('http');
 
 module.exports = function (context) {
-  const Q = context.requireCordovaModule('q');
-  const deferred = Q.defer();
+  const Q         = context.requireCordovaModule('q');
+  const deferred  = Q.defer();
+  const et        = context.requireCordovaModule('elementtree');
+  const platforms = context.opts.platforms || [];
 
-  const et = context.requireCordovaModule('elementtree');
-  const configPath = path.join(context.opts.projectRoot, 'config.xml');
-  const xmlContent = fs.readFileSync(configPath, 'utf8');
-  const doc = et.parse(xmlContent);
-
-  let iconCdnUrl = '';
-  const prefEls = doc.findall('preference');
-  for (const el of prefEls) {
-    if (el.get('name') === 'ICON_CDN_URL') {
-      iconCdnUrl = el.get('value') || '';
-    }
-  }
-
-  if (!iconCdnUrl) {
-    console.log('[RuntimeIconChanger] ICON_CDN_URL not set — skipping Android alias generation.');
+  if (!platforms.includes('android')) {
     deferred.resolve();
     return deferred.promise;
   }
 
-  console.log('[RuntimeIconChanger] Fetching icon list from: ' + iconCdnUrl);
+  const configPath = path.join(context.opts.projectRoot, 'config.xml');
+  if (!fs.existsSync(configPath)) {
+    deferred.resolve();
+    return deferred.promise;
+  }
+
+  const doc        = et.parse(fs.readFileSync(configPath, 'utf8'));
+  const iconCdnUrl = getPreference(doc, 'ICON_CDN_URL');
+
+  if (!iconCdnUrl) {
+    log('info', 'ICON_CDN_URL not set — skipping Android alias generation');
+    deferred.resolve();
+    return deferred.promise;
+  }
+
+  log('info', 'Fetching icon list from: ' + iconCdnUrl);
 
   fetchJson(iconCdnUrl)
-    .then(json => {
-      const icons = json.icons;
-      if (!Array.isArray(icons) || icons.length === 0) {
+    .then(function (json) {
+      var icons = json.icons;
+      if (!Array.isArray(icons) || !icons.length) {
         deferred.resolve();
         return;
       }
 
-      const androidPlatformDir = path.join(context.opts.projectRoot, 'platforms', 'android');
-      const appDir = path.join(androidPlatformDir, 'app', 'src', 'main');
-      const resDir = path.join(appDir, 'res');
+      // MABS Android project structure
+      var appDir  = path.join(context.opts.projectRoot, 'platforms', 'android', 'app', 'src', 'main');
+      var resDir  = path.join(appDir, 'res');
 
-      // Density → (folder suffix, size px)
-      const densities = [
+      var densities = [
         { folder: 'mipmap-mdpi',    size: 48  },
         { folder: 'mipmap-hdpi',    size: 72  },
         { folder: 'mipmap-xhdpi',   size: 96  },
@@ -62,129 +72,145 @@ module.exports = function (context) {
         { folder: 'mipmap-xxxhdpi', size: 192 },
       ];
 
-      const downloadPromises = icons.map(icon => {
-        return downloadAndResizeIcon(icon, resDir, densities);
-      });
-
-      return Promise.all(downloadPromises).then(iconInfoList => {
-        // Inject activity-alias entries into AndroidManifest.xml
-        injectAliasesToManifest(appDir, iconInfoList);
-        console.log('[RuntimeIconChanger] Android aliases registered for: ' +
-          iconInfoList.map(i => i.name).join(', '));
+      return Promise.all(icons.map(function (icon) {
+        return downloadIconForAndroid(icon, resDir, densities);
+      })).then(function (iconInfos) {
+        injectAliases(appDir, iconInfos);
+        log('info', 'Activity aliases registered: ' + iconInfos.map(function (i) { return i.name; }).join(', '));
         deferred.resolve();
       });
     })
-    .catch(err => {
-      console.warn('[RuntimeIconChanger] Android hook warning: ' + err.message);
+    .catch(function (err) {
+      log('warn', 'Hook error (non-fatal): ' + err.message);
       deferred.resolve();
     });
 
   return deferred.promise;
 };
 
-// ---- Helpers ----
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function log(level, msg) {
+  var prefix = '[RuntimeIconChanger Android] ';
+  if (level === 'warn')  console.warn(prefix  + msg);
+  else                   console.log(prefix   + msg);
+}
+
+function getPreference(doc, name) {
+  var all = doc.findall('preference').concat(
+    doc.findall('platform[@name="android"]/preference')
+  );
+  for (var i = 0; i < all.length; i++) {
+    if ((all[i].get('name') || '').toUpperCase() === name.toUpperCase()) {
+      return all[i].get('value') || '';
+    }
+  }
+  return '';
+}
+
+function mkdirSafe(dir) {
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+}
 
 function fetchJson(url) {
-  return new Promise((resolve, reject) => {
-    const lib = url.startsWith('https') ? https : http;
-    lib.get(url, res => {
-      let data = '';
-      res.on('data', chunk => (data += chunk));
-      res.on('end', () => {
+  return new Promise(function (resolve, reject) {
+    var lib = url.startsWith('https') ? https : http;
+    var req = lib.get(url, { timeout: 15000 }, function (res) {
+      var data = '';
+      res.on('data', function (c) { data += c; });
+      res.on('end', function () {
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error('Invalid JSON: ' + e.message)); }
+        catch (e) { reject(new Error('JSON parse error: ' + e.message)); }
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', function () { req.destroy(); reject(new Error('Request timed out')); });
   });
 }
 
-function downloadAndResizeIcon(icon, resDir, densities) {
-  return new Promise((resolve, reject) => {
-    const name = icon.name;
-    const resourceUrl = icon.resource;
-    const lib = resourceUrl.startsWith('https') ? https : http;
-
-    lib.get(resourceUrl, res => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        try {
-          // eslint-disable-next-line
-          const Jimp = require('jimp');
-          Jimp.read(buffer).then(img => {
-            const writes = densities.map(d => {
-              const dir = path.join(resDir, d.folder);
-              fs.mkdirSync(dir, { recursive: true });
-              return img.clone()
-                .resize(d.size, d.size)
-                .writeAsync(path.join(dir, 'ic_launcher_' + name + '.png'));
-            });
-            return Promise.all(writes);
-          }).then(() => {
-            resolve({ name, mipmapName: 'ic_launcher_' + name });
-          }).catch(() => {
-            // Fallback: copy raw buffer
-            densities.forEach(d => {
-              const dir = path.join(resDir, d.folder);
-              fs.mkdirSync(dir, { recursive: true });
-              fs.writeFileSync(path.join(dir, 'ic_launcher_' + name + '.png'), buffer);
-            });
-            resolve({ name, mipmapName: 'ic_launcher_' + name });
-          });
-        } catch (_) {
-          densities.forEach(d => {
-            const dir = path.join(resDir, d.folder);
-            fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(path.join(dir, 'ic_launcher_' + name + '.png'), buffer);
-          });
-          resolve({ name, mipmapName: 'ic_launcher_' + name });
-        }
-      });
-    }).on('error', reject);
+function fetchBuffer(url) {
+  return new Promise(function (resolve, reject) {
+    var lib = url.startsWith('https') ? https : http;
+    var req = lib.get(url, { timeout: 30000 }, function (res) {
+      var chunks = [];
+      res.on('data', function (c) { chunks.push(c); });
+      res.on('end', function () { resolve(Buffer.concat(chunks)); });
+    });
+    req.on('error', reject);
+    req.on('timeout', function () { req.destroy(); reject(new Error('Download timed out')); });
   });
 }
 
-function injectAliasesToManifest(appDir, iconInfoList) {
-  const manifestPath = path.join(appDir, 'AndroidManifest.xml');
+function downloadIconForAndroid(icon, resDir, densities) {
+  var name        = icon.name;
+  var resourceUrl = icon.resource;
+
+  return fetchBuffer(resourceUrl).then(function (buffer) {
+    var Jimp;
+    try { Jimp = require('jimp'); } catch (_) { Jimp = null; }
+
+    if (Jimp) {
+      return Jimp.read(buffer).then(function (img) {
+        return Promise.all(densities.map(function (d) {
+          var dir = path.join(resDir, d.folder);
+          mkdirSafe(dir);
+          return img.clone().resize(d.size, d.size)
+            .writeAsync(path.join(dir, 'ic_launcher_' + name + '.png'));
+        }));
+      }).then(function () {
+        return { name: name, mipmapName: 'ic_launcher_' + name };
+      });
+    }
+
+    // Fallback: copy raw buffer to every density folder
+    densities.forEach(function (d) {
+      var dir = path.join(resDir, d.folder);
+      mkdirSafe(dir);
+      fs.writeFileSync(path.join(dir, 'ic_launcher_' + name + '.png'), buffer);
+    });
+    return { name: name, mipmapName: 'ic_launcher_' + name };
+  });
+}
+
+function injectAliases(appDir, iconInfos) {
+  var manifestPath = path.join(appDir, 'AndroidManifest.xml');
   if (!fs.existsSync(manifestPath)) {
-    console.warn('[RuntimeIconChanger] AndroidManifest.xml not found at: ' + manifestPath);
+    log('warn', 'AndroidManifest.xml not found — cannot inject aliases');
     return;
   }
 
-  let manifest = fs.readFileSync(manifestPath, 'utf8');
+  var manifest    = fs.readFileSync(manifestPath, 'utf8');
+  var pkgMatch    = manifest.match(/package="([^"]+)"/);
+  var packageName = pkgMatch ? pkgMatch[1] : '';
 
-  // Read package name
-  const pkgMatch = manifest.match(/package="([^"]+)"/);
-  const packageName = pkgMatch ? pkgMatch[1] : '';
-
-  // Remove previously injected aliases
+  // Remove previously injected block (idempotent)
   manifest = manifest.replace(
-    /\s*<!-- RuntimeIconChanger aliases start -->[\s\S]*?<!-- RuntimeIconChanger aliases end -->/g,
+    /\n?\s*<!-- RuntimeIconChanger:start -->[\s\S]*?<!-- RuntimeIconChanger:end -->\n?/g,
     ''
   );
 
   // Build alias XML
-  let aliases = '\n    <!-- RuntimeIconChanger aliases start -->';
-  for (const info of iconInfoList) {
-    const aliasName = packageName + '.MainActivity_' + info.name;
-    const enabled = info.name === 'default' ? 'true' : 'false';
-    aliases += `
-    <activity-alias
-        android:name="${aliasName}"
-        android:enabled="${enabled}"
-        android:exported="true"
-        android:icon="@mipmap/${info.mipmapName}"
-        android:targetActivity=".MainActivity">
-        <intent-filter>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="android.intent.category.LAUNCHER" />
-        </intent-filter>
-    </activity-alias>`;
-  }
-  aliases += '\n    <!-- RuntimeIconChanger aliases end -->';
+  var block = '\n    <!-- RuntimeIconChanger:start -->';
+  iconInfos.forEach(function (info) {
+    var alias   = packageName + '.MainActivity_' + info.name;
+    var enabled = info.name === 'default' ? 'true' : 'false';
+    block +=
+      '\n    <activity-alias' +
+      '\n        android:name="'      + alias                 + '"' +
+      '\n        android:enabled="'   + enabled               + '"' +
+      '\n        android:exported="true"' +
+      '\n        android:icon="@mipmap/' + info.mipmapName + '"' +
+      '\n        android:targetActivity=".MainActivity">' +
+      '\n        <intent-filter>' +
+      '\n            <action android:name="android.intent.action.MAIN" />' +
+      '\n            <category android:name="android.intent.category.LAUNCHER" />' +
+      '\n        </intent-filter>' +
+      '\n    </activity-alias>';
+  });
+  block += '\n    <!-- RuntimeIconChanger:end -->';
 
-  // Insert before </application>
-  manifest = manifest.replace(/<\/application>/, aliases + '\n</application>');
+  manifest = manifest.replace(/<\/application>/, block + '\n</application>');
   fs.writeFileSync(manifestPath, manifest, 'utf8');
 }

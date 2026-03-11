@@ -1,59 +1,80 @@
 # Runtime Icon Changer
 
-Tính năng này cho phép thay đổi icon launcher của ứng dụng (iOS & Android) trong lúc **runtime**, mà không cần rebuild. Danh sách icon được nạp từ một file JSON trên CDN.
+Cho phép thay đổi icon launcher của ứng dụng **(iOS & Android)** trong lúc **runtime**, không cần rebuild. Tương thích đầy đủ với **OutSystems MABS 9+**.
 
-## Cấu hình
+---
 
-### 1. Thêm preference vào `config.xml`
+## Cấu hình OutSystems (MABS)
+
+Thêm vào **Extensibility Configurations** của ứng dụng:
+
+```json
+{
+  "preferences": {
+    "global": [
+      {
+        "name": "ICON_CDN_URL",
+        "value": "https://cdn.example.com/icons/icon-list.json"
+      }
+    ]
+  },
+  "plugin": {
+    "url": "https://github.com/vnkhoado/cordova-plugin-change-app-info.git#feature/runtime-icon-update"
+  }
+}
+```
+
+> **Quan trọng:** Dùng `preferences.global` — KHÔNG dùng `plugin.variables`.
+
+---
+
+## Cấu hình Cordova thuần
 
 ```xml
+<!-- config.xml -->
 <preference name="ICON_CDN_URL"
     value="https://cdn.example.com/icons/icon-list.json" />
 ```
 
-### 2. Cấu trúc file JSON trên CDN
+---
 
-File JSON phải có cấu trúc sau:
+## Cấu trúc CDN JSON
 
 ```json
 {
   "icons": [
-    {
-      "name": "default",
-      "resource": "https://cdn.example.com/icons/default.png"
-    },
-    {
-      "name": "christmas",
-      "resource": "https://cdn.example.com/icons/christmas.png"
-    },
-    {
-      "name": "summer",
-      "resource": "https://cdn.example.com/icons/summer.png"
-    }
+    { "name": "default",   "resource": "https://cdn.example.com/icons/default.png" },
+    { "name": "christmas", "resource": "https://cdn.example.com/icons/christmas.png" },
+    { "name": "summer",    "resource": "https://cdn.example.com/icons/summer.png" }
   ]
 }
 ```
 
-- `name`: tên định danh duy nhất cho icon (chỉ dùng chữ thường, số, dấu gạch nối)
-- `resource`: link CDN trỏ đến file PNG, kích thước **1024 × 1024 px**
+| Trường | Yêu cầu |
+|--------|---------|
+| `name` | Duy nhất, chỉ dùng chữ thường + số + dấu gạch ngang |
+| `resource` | URL công khai, CORS bật, Content-Type: `image/png` |
+| Kích thước ảnh | **1024 × 1024 px**, nền đặc (không trong suốt) |
 
 ---
 
-## Cách hoạt động
+## Cơ chế hoạt động
 
-### Build time
+### Build time — Hook tự động
 
 | Platform | Hook | Việc làm |
 |----------|------|-----------|
-| iOS | `hooks/ios/register-alternate-icons.js` | Tải PNG từ CDN, resize về tất cả các kích thước cần thiết, copy vào Xcode project (`Resources/RuntimeIcons/<name>/`), đăng ký `CFBundleAlternateIcons` trong `*-Info.plist` |
-| Android | `hooks/android/register-icon-aliases.js` | Tải PNG từ CDN, resize về các density `mipmap-*`, inject `<activity-alias>` vào `AndroidManifest.xml` với tên `<package>.MainActivity_<iconName>` |
+| iOS | `hooks/ios/register-alternate-icons.js` | Download PNG → resize → copy vào `Resources/RuntimeIcons/<name>/` → đăng ký `CFBundleAlternateIcons` + `UIApplicationSupportsAlternateIcons` trong `*-Info.plist` |
+| Android | `hooks/android/register-icon-aliases.js` | Download PNG → resize → copy vào `mipmap-*` → inject `<activity-alias>` vào `AndroidManifest.xml` |
 
-> **Lưu ý quan trọng:** iOS yêu cầu icon phải được bundle bên trong app binary — không thể dùng icon tải về lúc runtime thuần tuý. Các icon từ CDN được download lúc `after_prepare` và đóng gói vào build.
+> **Giới hạn iOS:** Apple yêu cầu alternate icon phải được bundle trong binary. Hook download icon từ CDN lúc `after_prepare` để đóng gói vào build — sau đó runtime chỉ gọi `UIApplication.setAlternateIconName`.
 
-### Runtime
+### Runtime — Native switching
 
-- **iOS:** Dùng `UIApplication.setAlternateIconName(name)` (yêu cầu iOS 10.3+)
-- **Android:** Dùng `PackageManager.setComponentEnabledSetting` để bật alias tương ứng và tắt các alias khác
+| Platform | Cơ chế | Yêu cầu |
+|----------|--------|---------|
+| iOS | `UIApplication.setAlternateIconName(name)` | iOS 10.3+, icon phải đăng ký trong Info.plist |
+| Android | `PackageManager.setComponentEnabledSetting` với `DONT_KILL_APP` | API 21+, `<activity-alias>` trong Manifest |
 
 ---
 
@@ -62,55 +83,74 @@ File JSON phải có cấu trúc sau:
 ```js
 var RIC = cordova.plugins.RuntimeIconChanger;
 
-// Lấy danh sách icon từ CDN JSON
-RIC.getIconList(
-  function(icons) {
-    // icons = [ { name: 'default', resource: 'https://...' }, ... ]
+// Kiểm tra thiết bị có hỗ trợ không
+RIC.isSupported(function(ok) {
+  if (!ok) return; // iOS < 10.3
+
+  // Lấy danh sách icon từ CDN
+  RIC.getIconList(function(icons) {
     console.log(icons);
-  },
-  function(err) { console.error(err); }
-);
+    // => [ {name:'default', resource:'...'}, {name:'christmas', resource:'...'} ]
+  }, onError);
 
-// Đổi icon
-RIC.changeIcon(
-  'christmas',
-  function(msg) { console.log('Thành công:', msg); },
-  function(err) { console.error('Lỗi:', err); }
-);
+  // Đổi icon
+  RIC.changeIcon('christmas', function(msg) {
+    console.log('Thành công:', msg);
+  }, onError);
 
-// Reset về icon mặc định
-RIC.resetToDefault(
-  function(msg) { console.log(msg); },
-  function(err) { console.error(err); }
-);
+  // Reset về icon mặc định
+  RIC.resetToDefault(function(msg) {
+    console.log(msg);
+  }, onError);
 
-// Lấy icon đang active
-RIC.getCurrentIcon(
-  function(name) { console.log('Icon hiện tại:', name); },
-  function(err) { console.error(err); }
-);
+  // Lấy tên icon đang active
+  RIC.getCurrentIcon(function(name) {
+    console.log('Icon hiện tại:', name); // 'default' hoặc 'christmas'
+  }, onError);
+});
+
+function onError(err) { console.error('[RIC] Error:', err); }
 ```
 
 ---
 
-## Yêu cầu Platform
+## Yêu cầu platform
 
 | Platform | Điều kiện |
 |----------|-----------|
-| iOS | iOS 10.3+, `UIApplicationSupportsAlternateIcons: true` trong Info.plist (tự động thêm bởi hook) |
-| Android | API 21+ (Android 5.0), phải khai báo `<activity-alias>` trong Manifest (tự động bởi hook) |
+| iOS | iOS 10.3+, bundle alternate icons (tự động bởi hook) |
+| Android | API 21+ (Android 5.0), AndroidX enabled, `<activity-alias>` (tự động bởi hook) |
+| MABS | Version 9+ (Cordova iOS 6+, Cordova Android 10+) |
 
 ---
 
+## MABS — Optimisations áp dụng
+
+- **Không dùng `plugin.variables`** — đọc từ `preferences.getString()` (case-insensitive)
+- **Không có npm dependencies bắt buộc** — `jimp` là tuỳ chọn; nếu không có, hook dùng fallback copy
+- **Non-fatal hooks** — lỗi hook chỉ log cảnh báo, không bao giờ phá vỡ build
+- **Idempotent** — hook dọn dẹp output cũ trước khi inject lại (tránh duplicate aliases)
+- **Không ghi vào bundle** — iOS chỉ switch alternate icon đã bundle; không ghi file vào app bundle lúc runtime
+- **`DONT_KILL_APP`** — Android switch icon không force restart
+- **Case-insensitive key** — đọc cả `icon_cdn_url` lẫn `ICON_CDN_URL`
+
+---
+
+## Kiểm tra build log
+
+Trong MABS build log bạn sẽ thấy:
+
+```
+[RuntimeIconChanger iOS] Fetching icon list from: https://...
+[RuntimeIconChanger iOS] Registered alternate icons: default, christmas, summer
+
+[RuntimeIconChanger Android] Fetching icon list from: https://...
+[RuntimeIconChanger Android] Activity aliases registered: default, christmas, summer
+```
+
 ## Lưu ý
 
-- Lần đầu build cần có kết nối internet để hook download icon từ CDN
-- Nếu CDN URL không set hoặc JSON không hợp lệ, hook bỏ qua và không gây lỗi build
-- Trên Android, việc đổi icon yêu cầu app restart (hệ điều hành tự làm điều này)
-- `jimp` là dependency tùy chọn — nếu có thì icon được resize chính xác, nếu không hook sẽ copy file gốc 1024x1024
-
-## Cài đặt jimp (khuyến nghị)
-
-```bash
-npm install jimp --save-dev
-```
+- Lần đầu build cần internet để hook download icon
+- Nếu CDN trả về lỗi, hook bỏ qua (build vẫn thành công) nhưng tính năng đổi icon sẽ không hoạt động
+- Cài `jimp` (`npm install jimp --save-dev`) để icon được resize chính xác theo density
+- Trên Android, việc đổi icon yêu cầu icon đã được đăng ký trong Manifest lúc build
