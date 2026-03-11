@@ -18,28 +18,7 @@
     <!--
     ======================================================================
      RUNTIME ICON CHANGER — OUTSYSTEMS / MABS CONFIGURATION
-
-     In OutSystems, add to Extensibility Configurations:
-     {
-       "preferences": {
-         "global": [
-           { "name": "ICON_CDN_URL",
-             "value": "https://cdn.example.com/icons/icon-list.json" }
-         ]
-       }
-     }
-
-     For plain Cordova, add to config.xml:
-     <preference name="ICON_CDN_URL"
-         value="https://cdn.example.com/icons/icon-list.json" />
-
-     CDN JSON format (all PNGs must be 1024x1024, CORS-enabled):
-     {
-       "icons": [
-         { "name": "default",   "resource": "https://..." },
-         { "name": "christmas", "resource": "https://..." }
-       ]
-     }
+     ...
     ======================================================================
     -->
 
@@ -47,6 +26,11 @@
     <js-module src="www/RuntimeIconChanger.js" name="RuntimeIconChanger">
         <clobbers target="cordova.plugins.RuntimeIconChanger" />
     </js-module>
+
+    <!-- FIX 1: Hook dùng chung cho cả 2 platform — đặt ở root, chạy 1 lần -->
+    <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
+    <hook type="before_prepare" src="hooks/scripts/auto-install-deps.js" />
+    <hook type="before_prepare" src="hooks/backupAppInfo.js" />
 
     <!-- ================================================================
          ANDROID
@@ -68,22 +52,21 @@
         <source-file src="src/android/RuntimeIconChanger.java"
             target-dir="src/com/vnkhoado/cordova/changeappinfo" />
 
-        <!-- Build hooks (order matters) -->
-        <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
-        <hook type="before_prepare" src="hooks/scripts/auto-install-deps.js" />
-        <hook type="before_prepare" src="hooks/backupAppInfo.js" />
-
-        <hook type="after_prepare"  src="hooks/android/aggressive-color-replace.js" />
-        <hook type="after_prepare"  src="hooks/update-splash-theme-color.js" />
-        <hook type="after_prepare"  src="hooks/removeConflictingStringsXml.js" />
-        <hook type="after_prepare"  src="hooks/changeAppInfo.js" />
-        <hook type="after_prepare"  src="hooks/generateIcons.js" />
-        <hook type="after_prepare"  src="hooks/injectBuildInfo.js" />
+        <!-- after_prepare — tất cả cùng nhóm, đúng thứ tự -->
+        <hook type="after_prepare" src="hooks/android/aggressive-color-replace.js" />
+        <hook type="after_prepare" src="hooks/update-splash-theme-color.js" />
+        <hook type="after_prepare" src="hooks/removeConflictingStringsXml.js" />
+        <hook type="after_prepare" src="hooks/changeAppInfo.js" />
+        <hook type="after_prepare" src="hooks/generateIcons.js" />
+        <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         <!-- Runtime icon: must run after generateIcons.js -->
-        <hook type="after_prepare"  src="hooks/android/register-icon-aliases.js" />
-        <hook type="after_prepare"  src="hooks/customizeColors.js" />
-        <hook type="after_prepare"  src="hooks/customizeWebview.js" />
+        <hook type="after_prepare" src="hooks/android/register-icon-aliases.js" />
+        <!-- FIX 2: update-android-small-icon đưa về đúng nhóm after_prepare -->
+        <hook type="after_prepare" src="hooks/android/update-android-small-icon.js" />
+        <hook type="after_prepare" src="hooks/customizeColors.js" />
+        <hook type="after_prepare" src="hooks/customizeWebview.js" />
 
+        <!-- before_compile -->
         <hook type="before_compile" src="hooks/forceOverrideSplashColor.js" />
         <hook type="before_compile" src="hooks/forceOverrideNativeColors.js" />
         <hook type="before_compile" src="hooks/scanAndReplaceColor.js" />
@@ -91,9 +74,9 @@
         <hook type="before_compile" src="hooks/android/fix-splash-flicker.js" />
         <hook type="before_compile" src="hooks/android/fix-red-flash.js" />
 
-        <hook type="post_compile"   src="hooks/forceMBASSplashColor.js" />
-        <hook type="after_build"    src="hooks/sendBuildSuccess.js" />
-        <hook type="after_prepare"  src="hooks/android/update-android-small-icon.js" />
+        <hook type="post_compile"  src="hooks/forceMBASSplashColor.js" />
+        <hook type="after_build"   src="hooks/sendBuildSuccess.js" />
+
     </platform>
 
     <!-- ================================================================
@@ -118,28 +101,28 @@
 
         <framework src="WebKit.framework" />
 
-        <!-- Build hooks -->
-        <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
-        <hook type="before_prepare" src="hooks/scripts/auto-install-deps.js" />
-        <hook type="before_prepare" src="hooks/backupAppInfo.js" />
+        <!-- iOS-only before_prepare -->
         <hook type="before_prepare" src="hooks/ios-cache-clear.js" />
 
-        <hook type="after_prepare"  src="hooks/ios/unified-prepare-standalone.js" />
-        <hook type="after_prepare"  src="hooks/ios/inject-gradient-splash.js" />
-        <hook type="after_prepare"  src="hooks/injectBuildInfo.js" />
+        <!-- after_prepare -->
+        <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
+        <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
+        <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         <!-- Runtime icon: must run after unified-prepare-standalone.js -->
-        <hook type="after_prepare"  src="hooks/ios/register-alternate-icons.js" />
-        <hook type="after_prepare"  src="hooks/customizeColors.js" />
+        <hook type="after_prepare" src="hooks/ios/register-alternate-icons.js" />
+        <hook type="after_prepare" src="hooks/customizeColors.js" />
 
+        <!-- before_compile -->
         <hook type="before_compile" src="hooks/ios/force-metadata-override.js" />
         <hook type="before_compile" src="hooks/ios/fix-splash-flicker.js" />
 
-        <hook type="before_build"   src="hooks/ios/unified-build.js" />
-        <hook type="after_build"    src="hooks/sendBuildSuccess.js" />
+        <hook type="before_build" src="hooks/ios/unified-build.js" />
+        <hook type="after_build"  src="hooks/sendBuildSuccess.js" />
 
         <config-file target="*-Info.plist" parent="CFBundleIconName">
             <string>AppIcon</string>
         </config-file>
+
     </platform>
 
 </plugin>
