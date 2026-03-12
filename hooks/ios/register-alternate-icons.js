@@ -24,7 +24,6 @@
 
 const path   = require('path');
 const fs     = require('fs');
-const crypto = require('crypto');
 
 const {
   getConfigParser,
@@ -98,21 +97,40 @@ module.exports = function (context) {
 
           logWithTimestamp(`[${TAG}] App name from .xcodeproj: ${appFolderName}`);
 
-          // ✅ KEY FIX: copy vào www/ thay vì Resources/
-          // www/ đã là folder reference trong pbxproj của Cordova
-          // → giữ nguyên folder structure khi copy vào bundle
-          // → KHÔNG cần thêm bất kỳ entry nào vào pbxproj
-          const wwwDir      = path.join(iosPlatDir, appFolderName, 'www');
-          const resourcesDir = path.join(wwwDir, 'RuntimeIcons');
-          ensureDirectoryExists(resourcesDir);
+          const xcodeProjDir = path.join(iosPlatDir, appFolderName);
 
-          return Promise.all(icons.map(icon => downloadIconForIos(icon, resourcesDir)))
-            .then(function (iconNames) {
-              updateInfoPlist(iosPlatDir, appFolderName, iconNames);
-              // updatePbxproj đã bị bỏ — không cần thiết
-              logSectionComplete(`✅ [${TAG}] Registered: ${iconNames.join(', ')}`);
-              resolve();
+          // Copy vào www/ — folder reference sẵn có trong Xcode, giữ folder structure
+          const wwwIconsDir = path.join(xcodeProjDir, 'www', 'RuntimeIcons');
+          // Copy vào Resources/ — backup phòng MABS reset www/ giữa các bước
+          const resIconsDir = path.join(xcodeProjDir, 'Resources', 'RuntimeIcons');
+
+          ensureDirectoryExists(wwwIconsDir);
+          ensureDirectoryExists(resIconsDir);
+
+          return Promise.all(icons.map(icon =>
+            downloadIconForIos(icon, wwwIconsDir, resIconsDir)
+          )).then(function (iconNames) {
+            updateInfoPlist(iosPlatDir, appFolderName, iconNames);
+
+            // Verify files thực sự tồn tại sau khi copy
+            iconNames.forEach(function (name) {
+              ICON_VARIANTS.forEach(function (v) {
+                const wwwPath = path.join(wwwIconsDir, name, `Icon${v.suffix}.png`);
+                const resPath = path.join(resIconsDir, name, `Icon${v.suffix}.png`);
+                logWithTimestamp(
+                  `[${TAG}] VERIFY www/RuntimeIcons/${name}/Icon${v.suffix}.png: ` +
+                  (fs.existsSync(wwwPath) ? '✅' : '❌ MISSING')
+                );
+                logWithTimestamp(
+                  `[${TAG}] VERIFY Resources/RuntimeIcons/${name}/Icon${v.suffix}.png: ` +
+                  (fs.existsSync(resPath) ? '✅' : '❌ MISSING')
+                );
+              });
             });
+
+            logSectionComplete(`✅ [${TAG}] Registered: ${iconNames.join(', ')}`);
+            resolve();
+          });
         })
         .catch(function (err) {
           logWithTimestamp(`⚠️  [${TAG}] Hook error (non-fatal): ${err.message}`);
@@ -134,12 +152,14 @@ function getAppNameFromXcodeProj(iosPlatDir) {
   if (!fs.existsSync(iosPlatDir)) return null;
   const items = fs.readdirSync(iosPlatDir);
 
+  // Ưu tiên: tìm .xcodeproj không phải hidden
   for (const item of items) {
     if (!item.startsWith('.') && item.endsWith('.xcodeproj')) {
       return item.replace('.xcodeproj', '');
     }
   }
 
+  // Fallback: tìm folder không phải hidden/system
   const excluded = ['CordovaLib', 'www', 'cordova', 'build', 'DerivedData', 'Pods'];
   for (const item of items) {
     if (item.startsWith('.')) continue;
@@ -152,24 +172,36 @@ function getAppNameFromXcodeProj(iosPlatDir) {
 }
 
 // ============================================================================
-// Download & resize
+// Download & resize — copy sang cả www/ và Resources/
 // ============================================================================
 
-function downloadIconForIos(icon, resourcesDir) {
+function downloadIconForIos(icon, wwwDir, resDir) {
   const name    = icon.name;
-  const iconDir = path.join(resourcesDir, name);
-  ensureDirectoryExists(iconDir);
+  const wwwIcon = path.join(wwwDir, name);
+  const resIcon = path.join(resDir, name);
+  ensureDirectoryExists(wwwIcon);
+  ensureDirectoryExists(resIcon);
 
   logWithTimestamp(`[${TAG}] Downloading: ${name} ← ${icon.resource}`);
 
   return downloadFile(icon.resource).then(function (buffer) {
-    fs.writeFileSync(path.join(iconDir, 'Icon-1024.png'), buffer);
+    // Lưu bản 1024 gốc
+    fs.writeFileSync(path.join(wwwIcon, 'Icon-1024.png'), buffer);
+    fs.writeFileSync(path.join(resIcon, 'Icon-1024.png'), buffer);
 
     return Promise.all(
-      ICON_VARIANTS.map(v =>
-        resizeImage(buffer, path.join(iconDir, `Icon${v.suffix}.png`), v.size)
-          .then(() => logWithTimestamp(`[${TAG}]   ✔ ${name} — Icon${v.suffix}.png (${v.size}px)`))
-      )
+      ICON_VARIANTS.map(function (v) {
+        const fileName = `Icon${v.suffix}.png`;
+        return resizeImage(buffer, path.join(wwwIcon, fileName), v.size)
+          .then(function () {
+            // Mirror sang Resources/
+            fs.copyFileSync(
+              path.join(wwwIcon, fileName),
+              path.join(resIcon, fileName)
+            );
+            logWithTimestamp(`[${TAG}]   ✔ ${name} — ${fileName} (${v.size}px)`);
+          });
+      })
     ).then(() => name);
   });
 }
@@ -222,7 +254,7 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
 
-  // ✅ CFBundleIconFiles dùng www/ prefix — khớp với bundle path
+  // CFBundleIconFiles dùng www/ prefix — khớp với path trong bundle
   const altDict = iconNames.map(name =>
     `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
     `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
@@ -263,6 +295,7 @@ function scanForFile(dir, patterns, maxDepth) {
     const fullPath = path.join(dir, item);
     let stat;
     try { stat = fs.statSync(fullPath); } catch (_) { continue; }
+
     if (stat.isFile()) {
       for (const pattern of patterns) {
         if (item === pattern || item.endsWith(pattern)) return fullPath;
