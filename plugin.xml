@@ -15,19 +15,12 @@
         <engine name="cordova" version=">=9.0.0" />
     </engines>
 
-    <!--
-    ======================================================================
-     RUNTIME ICON CHANGER — OUTSYSTEMS / MABS CONFIGURATION
-     ...
-    ======================================================================
-    -->
-
     <!-- Shared JS API -->
     <js-module src="www/RuntimeIconChanger.js" name="RuntimeIconChanger">
         <clobbers target="cordova.plugins.RuntimeIconChanger" />
     </js-module>
 
-    <!-- FIX 1: Hook dùng chung cho cả 2 platform — đặt ở root, chạy 1 lần -->
+    <!-- Hook dùng chung cho cả 2 platform — đặt ở root, chạy 1 lần -->
     <hook type="before_prepare" src="hooks/downloadCDNResources.js" />
     <hook type="before_prepare" src="hooks/scripts/auto-install-deps.js" />
     <hook type="before_prepare" src="hooks/backupAppInfo.js" />
@@ -52,7 +45,7 @@
         <source-file src="src/android/RuntimeIconChanger.java"
             target-dir="src/com/vnkhoado/cordova/changeappinfo" />
 
-        <!-- after_prepare — tất cả cùng nhóm, đúng thứ tự -->
+        <!-- after_prepare -->
         <hook type="after_prepare" src="hooks/android/aggressive-color-replace.js" />
         <hook type="after_prepare" src="hooks/update-splash-theme-color.js" />
         <hook type="after_prepare" src="hooks/removeConflictingStringsXml.js" />
@@ -61,7 +54,6 @@
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         <!-- Runtime icon: must run after generateIcons.js -->
         <hook type="after_prepare" src="hooks/android/register-icon-aliases.js" />
-        <!-- FIX 2: update-android-small-icon đưa về đúng nhóm after_prepare -->
         <hook type="after_prepare" src="hooks/android/update-android-small-icon.js" />
         <hook type="after_prepare" src="hooks/customizeColors.js" />
         <hook type="after_prepare" src="hooks/customizeWebview.js" />
@@ -108,13 +100,14 @@
         <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
         <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
-        <!-- Runtime icon: must run after unified-prepare-standalone.js -->
         <hook type="after_prepare" src="hooks/customizeColors.js" />
 
         <!-- before_compile -->
-        <hook type="before_compile" src="hooks/ios/register-alternate-icons.js" />
         <hook type="before_compile" src="hooks/ios/force-metadata-override.js" />
         <hook type="before_compile" src="hooks/ios/fix-splash-flicker.js" />
+        <!-- ✅ Runtime icon chạy ở before_compile — sau tất cả prepare steps -->
+        <!-- tránh MABS overwrite www/ và Info.plist sau after_prepare         -->
+        <hook type="before_compile" src="hooks/ios/register-alternate-icons.js" />
 
         <hook type="before_build" src="hooks/ios/unified-build.js" />
         <hook type="after_build"  src="hooks/sendBuildSuccess.js" />
