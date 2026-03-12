@@ -1,23 +1,20 @@
 /**
  * hooks/ios/register-alternate-icons.js  — MABS-optimised
  *
- * Cordova after_prepare hook (iOS).
+ * Cordova before_compile hook (iOS).
  *
  * What it does:
- *   1. Reads ICON_CDN_URL from config.xml (set via OutSystems Extensibility
- *      Configurations > preferences > global)
+ *   1. Reads ICON_CDN_URL from config.xml
  *   2. Fetches the CDN JSON (icon list)
  *   3. Downloads each PNG icon (must be 1024×1024)
- *   4. Saves them to platforms/ios/<AppName>/Resources/RuntimeIcons/<name>/
+ *   4. Saves them as flat files: platforms/ios/<AppName>/Resources/<name>@2x.png + @3x.png
  *   5. Updates *-Info.plist:
  *        - Adds UIApplicationSupportsAlternateIcons = true
- *        - Adds CFBundleAlternateIcons entries
+ *        - Adds CFBundleAlternateIcons with flat CFBundleIconFiles (no path)
  *
- * MABS constraints:
- *   - No npm dependencies (uses only Node built-ins)
- *   - Graceful degradation: warnings, never build failures
- *   - Follows OutSystems MABS hook file path conventions
- *   - Works with MABS 9+ (Cordova iOS 6+)
+ * FIX: iOS setAlternateIconName chỉ hoạt động khi icon là native bundle resource
+ *      với tên phẳng (không có thư mục con). www/RuntimeIcons/ không được iOS dùng
+ *      để render homescreen icon.
  */
 
 'use strict';
@@ -97,36 +94,25 @@ module.exports = function (context) {
 
           logWithTimestamp(`[${TAG}] App name from .xcodeproj: ${appFolderName}`);
 
-          // ✅ FIX: copy vào platforms/ios/www/ — đây là folder Xcode bundle
-          // KHÔNG phải platforms/ios/<AppName>/www/
-          const wwwIconsDir = path.join(iosPlatDir, 'www', 'RuntimeIcons');
+          // Alternate icons phải là native bundle resources.
+          // Lưu trực tiếp tại Resources/ với tên phẳng: <name>@2x.png, <name>@3x.png
+          const bundleIconsDir = path.join(iosPlatDir, appFolderName, 'Resources');
+          ensureDirectoryExists(bundleIconsDir);
 
-          // Backup vào Resources/ phòng www/ bị xử lý đặc biệt
-          const resIconsDir = path.join(iosPlatDir, appFolderName, 'Resources', 'RuntimeIcons');
-
-          ensureDirectoryExists(wwwIconsDir);
-          ensureDirectoryExists(resIconsDir);
-
-          logWithTimestamp(`[${TAG}] www path: ${wwwIconsDir}`);
-          logWithTimestamp(`[${TAG}] res path: ${resIconsDir}`);
+          logWithTimestamp(`[${TAG}] bundle icon path: ${bundleIconsDir}`);
 
           return Promise.all(icons.map(icon =>
-            downloadIconForIos(icon, wwwIconsDir, resIconsDir)
+            downloadIconForIos(icon, bundleIconsDir)
           )).then(function (iconNames) {
             updateInfoPlist(iosPlatDir, appFolderName, iconNames);
 
-            // Verify cả 2 location
+            // Verify bundle resource files
             iconNames.forEach(function (name) {
               ICON_VARIANTS.forEach(function (v) {
-                const wwwPath = path.join(wwwIconsDir, name, `Icon${v.suffix}.png`);
-                const resPath = path.join(resIconsDir, name, `Icon${v.suffix}.png`);
+                const bundlePath = path.join(bundleIconsDir, `${name}${v.suffix}.png`);
                 logWithTimestamp(
-                  `[${TAG}] VERIFY ios/www/RuntimeIcons/${name}/Icon${v.suffix}.png: ` +
-                  (fs.existsSync(wwwPath) ? '✅' : '❌ MISSING')
-                );
-                logWithTimestamp(
-                  `[${TAG}] VERIFY Resources/RuntimeIcons/${name}/Icon${v.suffix}.png: ` +
-                  (fs.existsSync(resPath) ? '✅' : '❌ MISSING')
+                  `[${TAG}] VERIFY Resources/${name}${v.suffix}.png: ` +
+                  (fs.existsSync(bundlePath) ? '✅' : '❌ MISSING')
                 );
               });
             });
@@ -173,31 +159,23 @@ function getAppNameFromXcodeProj(iosPlatDir) {
 }
 
 // ============================================================================
-// Download & resize
+// Download & resize — lưu flat: <name>@2x.png, <name>@3x.png trong bundleDir
 // ============================================================================
 
-function downloadIconForIos(icon, wwwDir, resDir) {
-  const name    = icon.name;
-  const wwwIcon = path.join(wwwDir, name);
-  const resIcon = path.join(resDir, name);
-  ensureDirectoryExists(wwwIcon);
-  ensureDirectoryExists(resIcon);
+function downloadIconForIos(icon, bundleDir) {
+  const name = icon.name;
 
   logWithTimestamp(`[${TAG}] Downloading: ${name} ← ${icon.resource}`);
 
   return downloadFile(icon.resource).then(function (buffer) {
-    fs.writeFileSync(path.join(wwwIcon, 'Icon-1024.png'), buffer);
-    fs.writeFileSync(path.join(resIcon, 'Icon-1024.png'), buffer);
+    // Giữ bản 1024 để debug
+    fs.writeFileSync(path.join(bundleDir, `${name}-1024.png`), buffer);
 
     return Promise.all(
       ICON_VARIANTS.map(function (v) {
-        const fileName = `Icon${v.suffix}.png`;
-        return resizeImage(buffer, path.join(wwwIcon, fileName), v.size)
+        const fileName = `${name}${v.suffix}.png`;
+        return resizeImage(buffer, path.join(bundleDir, fileName), v.size)
           .then(function () {
-            fs.copyFileSync(
-              path.join(wwwIcon, fileName),
-              path.join(resIcon, fileName)
-            );
             logWithTimestamp(`[${TAG}]   ✔ ${name} — ${fileName} (${v.size}px)`);
           });
       })
@@ -230,6 +208,7 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
 
   let plist = fs.readFileSync(plistPath, 'utf8');
 
+  // Đảm bảo UIApplicationSupportsAlternateIcons = true
   if (!plist.includes('UIApplicationSupportsAlternateIcons')) {
     plist = plist.replace(
       /(\s*)<\/dict>(\s*)<\/plist>\s*$/,
@@ -242,6 +221,7 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     );
   }
 
+  // Xoá block CFBundleIcons cũ để tránh duplicate
   plist = plist.replace(
     /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
@@ -249,17 +229,22 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
 
-  // www/ là folder reference trong Xcode → bundle tại www/RuntimeIcons/<name>/Icon
+  // CFBundleIconFiles dùng tên phẳng — KHÔNG có đường dẫn thư mục con
+  // iOS sẽ tự tìm <name>@2x.png và <name>@3x.png trong bundle root
   const altDict = iconNames.map(name =>
     `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
     `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
-    `\t\t\t\t<array><string>www/RuntimeIcons/${name}/Icon</string></array>\n` +
+    `\t\t\t\t<array><string>${name}</string></array>\n` +
     `\t\t\t\t<key>UIPrerenderedIcon</key>\n\t\t\t\t<false/>\n` +
     `\t\t\t</dict>\n`
   ).join('');
 
   const makeBlock = key =>
     `\t<key>${key}</key>\n\t<dict>\n` +
+    `\t\t<key>CFBundlePrimaryIcon</key>\n\t\t<dict>\n` +
+    `\t\t\t<key>CFBundleIconName</key>\n` +
+    `\t\t\t<string>AppIcon</string>\n` +
+    `\t\t</dict>\n` +
     `\t\t<key>CFBundleAlternateIcons</key>\n\t\t<dict>\n` +
     altDict +
     `\t\t</dict>\n\t</dict>\n`;
