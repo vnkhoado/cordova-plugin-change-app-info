@@ -1,11 +1,6 @@
 import Foundation
 import UIKit
 
-/**
- * RuntimeIconChanger.swift
- *
- * iOS native implementation — optimised for OutSystems MABS.
- */
 @objc(RuntimeIconChanger)
 class RuntimeIconChanger: CDVPlugin {
 
@@ -34,8 +29,15 @@ class RuntimeIconChanger: CDVPlugin {
             return
         }
 
-        // Chạy diagnostic TRƯỚC khi switch — kết quả trả về JS để xem trên UI
         let diag = buildDiagnostic(iconName: iconName)
+
+        // Gửi diagnostic ngay lập tức — không chờ setAlternateIconName
+        let earlyResult = CDVPluginResult(
+            status: .ok,
+            messageAs: "EARLY_DIAG: \(diag)"
+        )
+        earlyResult?.setKeepCallbackAs(true)
+        self.commandDelegate.send(earlyResult, callbackId: command.callbackId)
 
         let delegate   = self.commandDelegate!
         let callbackId = command.callbackId!
@@ -141,7 +143,6 @@ class RuntimeIconChanger: CDVPlugin {
             lines.append("supportsAlternateIcons=\(UIApplication.shared.supportsAlternateIcons)")
         }
 
-        // CFBundleIcons
         if let icons = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any] {
             if let altIcons = icons["CFBundleAlternateIcons"] as? [String: Any] {
                 lines.append("altIconKeys=\(altIcons.keys.sorted().joined(separator: ","))")
@@ -152,19 +153,16 @@ class RuntimeIconChanger: CDVPlugin {
             lines.append("CFBundleIcons=MISSING_FROM_PLIST")
         }
 
-        // UIApplicationSupportsAlternateIcons
         if let v = Bundle.main.infoDictionary?["UIApplicationSupportsAlternateIcons"] {
             lines.append("UIAppSupportsAltIcons=\(v)")
         } else {
             lines.append("UIAppSupportsAltIcons=MISSING_FROM_PLIST")
         }
 
-        // Bundle root
         let rootContents = (try? fm.contentsOfDirectory(atPath: bundlePath)) ?? []
         lines.append("hasWww=\(rootContents.contains("www"))")
         lines.append("hasRuntimeIcons=\(rootContents.contains("RuntimeIcons"))")
 
-        // www/ contents
         let wwwPath = bundlePath + "/www"
         if fm.fileExists(atPath: wwwPath) {
             let wwwContents = (try? fm.contentsOfDirectory(atPath: wwwPath)) ?? []
@@ -181,7 +179,6 @@ class RuntimeIconChanger: CDVPlugin {
             lines.append("www=NOT_FOUND_IN_BUNDLE")
         }
 
-        // File checks
         let checkPaths = [
             "www/RuntimeIcons/\(iconName)/Icon@2x.png",
             "www/RuntimeIcons/\(iconName)/Icon@3x.png",
@@ -196,7 +193,7 @@ class RuntimeIconChanger: CDVPlugin {
         return lines.joined(separator: " || ")
     }
 
-    // MARK: - Private helpers
+    // MARK: - Helpers
 
     private func sendSuccess(_ value: Bool, callbackId: String) {
         let result = CDVPluginResult(status: .ok, messageAs: value)
