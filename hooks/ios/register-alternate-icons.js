@@ -97,28 +97,31 @@ module.exports = function (context) {
 
           logWithTimestamp(`[${TAG}] App name from .xcodeproj: ${appFolderName}`);
 
-          const xcodeProjDir = path.join(iosPlatDir, appFolderName);
+          // ✅ FIX: copy vào platforms/ios/www/ — đây là folder Xcode bundle
+          // KHÔNG phải platforms/ios/<AppName>/www/
+          const wwwIconsDir = path.join(iosPlatDir, 'www', 'RuntimeIcons');
 
-          // Copy vào www/ — folder reference sẵn có trong Xcode, giữ folder structure
-          const wwwIconsDir = path.join(xcodeProjDir, 'www', 'RuntimeIcons');
-          // Copy vào Resources/ — backup phòng MABS reset www/ giữa các bước
-          const resIconsDir = path.join(xcodeProjDir, 'Resources', 'RuntimeIcons');
+          // Backup vào Resources/ phòng www/ bị xử lý đặc biệt
+          const resIconsDir = path.join(iosPlatDir, appFolderName, 'Resources', 'RuntimeIcons');
 
           ensureDirectoryExists(wwwIconsDir);
           ensureDirectoryExists(resIconsDir);
+
+          logWithTimestamp(`[${TAG}] www path: ${wwwIconsDir}`);
+          logWithTimestamp(`[${TAG}] res path: ${resIconsDir}`);
 
           return Promise.all(icons.map(icon =>
             downloadIconForIos(icon, wwwIconsDir, resIconsDir)
           )).then(function (iconNames) {
             updateInfoPlist(iosPlatDir, appFolderName, iconNames);
 
-            // Verify files thực sự tồn tại sau khi copy
+            // Verify cả 2 location
             iconNames.forEach(function (name) {
               ICON_VARIANTS.forEach(function (v) {
                 const wwwPath = path.join(wwwIconsDir, name, `Icon${v.suffix}.png`);
                 const resPath = path.join(resIconsDir, name, `Icon${v.suffix}.png`);
                 logWithTimestamp(
-                  `[${TAG}] VERIFY www/RuntimeIcons/${name}/Icon${v.suffix}.png: ` +
+                  `[${TAG}] VERIFY ios/www/RuntimeIcons/${name}/Icon${v.suffix}.png: ` +
                   (fs.existsSync(wwwPath) ? '✅' : '❌ MISSING')
                 );
                 logWithTimestamp(
@@ -145,21 +148,19 @@ module.exports = function (context) {
 };
 
 // ============================================================================
-// App name detection — bỏ qua hidden folder (.plugin-backup, v.v.)
+// App name detection
 // ============================================================================
 
 function getAppNameFromXcodeProj(iosPlatDir) {
   if (!fs.existsSync(iosPlatDir)) return null;
   const items = fs.readdirSync(iosPlatDir);
 
-  // Ưu tiên: tìm .xcodeproj không phải hidden
   for (const item of items) {
     if (!item.startsWith('.') && item.endsWith('.xcodeproj')) {
       return item.replace('.xcodeproj', '');
     }
   }
 
-  // Fallback: tìm folder không phải hidden/system
   const excluded = ['CordovaLib', 'www', 'cordova', 'build', 'DerivedData', 'Pods'];
   for (const item of items) {
     if (item.startsWith('.')) continue;
@@ -172,7 +173,7 @@ function getAppNameFromXcodeProj(iosPlatDir) {
 }
 
 // ============================================================================
-// Download & resize — copy sang cả www/ và Resources/
+// Download & resize
 // ============================================================================
 
 function downloadIconForIos(icon, wwwDir, resDir) {
@@ -185,7 +186,6 @@ function downloadIconForIos(icon, wwwDir, resDir) {
   logWithTimestamp(`[${TAG}] Downloading: ${name} ← ${icon.resource}`);
 
   return downloadFile(icon.resource).then(function (buffer) {
-    // Lưu bản 1024 gốc
     fs.writeFileSync(path.join(wwwIcon, 'Icon-1024.png'), buffer);
     fs.writeFileSync(path.join(resIcon, 'Icon-1024.png'), buffer);
 
@@ -194,7 +194,6 @@ function downloadIconForIos(icon, wwwDir, resDir) {
         const fileName = `Icon${v.suffix}.png`;
         return resizeImage(buffer, path.join(wwwIcon, fileName), v.size)
           .then(function () {
-            // Mirror sang Resources/
             fs.copyFileSync(
               path.join(wwwIcon, fileName),
               path.join(resIcon, fileName)
@@ -207,7 +206,7 @@ function downloadIconForIos(icon, wwwDir, resDir) {
 }
 
 // ============================================================================
-// Info.plist update
+// Info.plist
 // ============================================================================
 
 function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
@@ -219,13 +218,11 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
   ];
 
   let plistPath = candidates.find(p => fs.existsSync(p));
-
   if (!plistPath) {
     logWithTimestamp(`[${TAG}] Scanning for Info.plist...`);
     plistPath = scanForFile(iosPlatDir, ['Info.plist', '-Info.plist'], 3);
-    if (plistPath) logWithTimestamp(`[${TAG}] Found Info.plist: ${plistPath}`);
+    if (plistPath) logWithTimestamp(`[${TAG}] Found: ${plistPath}`);
   }
-
   if (!plistPath) {
     logWithTimestamp(`⚠️  [${TAG}] Info.plist not found`);
     return;
@@ -233,7 +230,6 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
 
   let plist = fs.readFileSync(plistPath, 'utf8');
 
-  // UIApplicationSupportsAlternateIcons = true
   if (!plist.includes('UIApplicationSupportsAlternateIcons')) {
     plist = plist.replace(
       /(\s*)<\/dict>(\s*)<\/plist>\s*$/,
@@ -246,7 +242,6 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     );
   }
 
-  // Xóa block cũ tránh duplicate
   plist = plist.replace(
     /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
@@ -254,7 +249,7 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
   );
 
-  // CFBundleIconFiles dùng www/ prefix — khớp với path trong bundle
+  // www/ là folder reference trong Xcode → bundle tại www/RuntimeIcons/<name>/Icon
   const altDict = iconNames.map(name =>
     `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
     `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
@@ -295,7 +290,6 @@ function scanForFile(dir, patterns, maxDepth) {
     const fullPath = path.join(dir, item);
     let stat;
     try { stat = fs.statSync(fullPath); } catch (_) { continue; }
-
     if (stat.isFile()) {
       for (const pattern of patterns) {
         if (item === pattern || item.endsWith(pattern)) return fullPath;
