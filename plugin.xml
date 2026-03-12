@@ -57,6 +57,7 @@
         <hook type="after_prepare" src="hooks/android/update-android-small-icon.js" />
         <hook type="after_prepare" src="hooks/customizeColors.js" />
         <hook type="after_prepare" src="hooks/customizeWebview.js" />
+        
 
         <!-- before_compile -->
         <hook type="before_compile" src="hooks/forceOverrideSplashColor.js" />
@@ -97,6 +98,8 @@
         <hook type="before_prepare" src="hooks/ios-cache-clear.js" />
 
         <!-- after_prepare -->
+        <!-- Hook chạy sau khi prepare để inject Info.plist -->
+        <hook type="after_prepare" src="hooks/ios/addAlternateIcons.js" />
         <hook type="after_prepare" src="hooks/ios/unified-prepare-standalone.js" />
         <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
