@@ -158,47 +158,38 @@ class RuntimeIconChanger: CDVPlugin {
             lines.append("UIAppSupportsAltIcons=MISSING_FROM_PLIST")
         }
 
-        let rootContents = (try? fm.contentsOfDirectory(atPath: bundlePath)) ?? []
-        let hasWww = rootContents.contains("www")
-        let hasRuntimeIcons = rootContents.contains("RuntimeIcons")
-        lines.append("hasWww=\(hasWww)")
-        lines.append("hasRuntimeIcons=\(hasRuntimeIcons)")
+        // CHECK: asset catalog (.car)
+        let carPath = bundlePath + "/Assets.car"
+        let hasAssetCar = fm.fileExists(atPath: carPath)
+        lines.append("hasAssetsCar=\(hasAssetCar)")
 
-        // CHECK 1: flat native bundle resources (cách đúng sau fix)
+        // CHECK: UIImage from asset catalog (works if imageset exists in .car)
+        let assetImage = UIImage(named: iconName)
+        lines.append("UIImage(named:\(iconName))=\(assetImage != nil ? "FOUND" : "NIL")")
+
+        // CHECK: flat PNGs in bundle root
         for suffix in ["@2x", "@3x"] {
             let fileName = "\(iconName)\(suffix).png"
             let exists = fm.fileExists(atPath: bundlePath + "/" + fileName)
             lines.append("\(exists ? "YES" : "NO"):bundle/\(fileName)")
         }
 
-        // CHECK 2: www/RuntimeIcons (cách cũ)
+        // LIST: all files at bundle root (first 30, excluding www)
+        let rootContents = ((try? fm.contentsOfDirectory(atPath: bundlePath)) ?? [])
+            .filter { !$0.hasPrefix("www") }
+            .sorted()
+        let hasWww = ((try? fm.contentsOfDirectory(atPath: bundlePath)) ?? []).contains("www")
+        lines.append("hasWww=\(hasWww)")
+        let preview = rootContents.prefix(30).joined(separator: ",")
+        lines.append("bundleRootFiles=\(preview)")
+
+        // CHECK: www/RuntimeIcons
         let wwwPath = bundlePath + "/www"
         if fm.fileExists(atPath: wwwPath) {
             let wwwContents = (try? fm.contentsOfDirectory(atPath: wwwPath)) ?? []
-            let wwwHasRIC = wwwContents.contains("RuntimeIcons")
-            lines.append("wwwHasRuntimeIcons=\(wwwHasRIC)")
-
-            let ricPath = wwwPath + "/RuntimeIcons"
-            if fm.fileExists(atPath: ricPath) {
-                let ricContents = (try? fm.contentsOfDirectory(atPath: ricPath)) ?? []
-                lines.append("www/RuntimeIcons/=\(ricContents.joined(separator: ","))")
-            } else {
-                lines.append("www/RuntimeIcons=NOT_FOUND")
-            }
+            lines.append("wwwHasRuntimeIcons=\(wwwContents.contains("RuntimeIcons"))")
         } else {
             lines.append("www=NOT_FOUND_IN_BUNDLE")
-        }
-
-        // CHECK 3: legacy paths
-        let legacyPaths = [
-            "www/RuntimeIcons/\(iconName)/Icon@2x.png",
-            "www/RuntimeIcons/\(iconName)/Icon@3x.png",
-            "RuntimeIcons/\(iconName)/Icon@2x.png",
-            "RuntimeIcons/\(iconName)/Icon@3x.png",
-        ]
-        for p in legacyPaths {
-            let exists = fm.fileExists(atPath: bundlePath + "/" + p)
-            lines.append("\(exists ? "YES" : "NO"):\(p)")
         }
 
         return lines.joined(separator: " || ")
