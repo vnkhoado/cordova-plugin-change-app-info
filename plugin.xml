@@ -97,17 +97,17 @@
           ALTERNATE ICON PLACEHOLDERS
           ===========================
           Cordova copies these files into platforms/ios/<App>/Resources/
-          AND injects the correct PBXFileReference + PBXBuildFile +
-          PBXResourcesBuildPhase entries into project.pbxproj automatically.
+          AND injects PBXFileReference + PBXBuildFile + PBXResourcesBuildPhase
+          into project.pbxproj automatically at plugin install time.
 
-          The hook register-alternate-icons.js (before_compile) then
-          OVERWRITES these placeholder files with real PNGs downloaded
-          from CDN — the pbxproj reference is already in place so Xcode
-          picks up the real images at compile time.
+          The hook register-alternate-icons.js (after_prepare) then:
+          1. Downloads real PNGs from CDN
+          2. Overwrites placeholder files already referenced in pbxproj
+          3. Injects pbxproj entries for the real icon name (tet2026)
+          4. Updates Info.plist CFBundleIconFiles
 
-          To add a new alternate icon season:
-            1. Add two more <resource-file> lines below
-            2. Hook will overwrite them from CDN at build time
+          Running at after_prepare ensures pbxproj is writable before
+          MABS locks it for xcodebuild.
         -->
         <resource-file src="res/ios/alt-icon-placeholder@2x.png"
                        target="alt-icon-placeholder@2x.png" />
@@ -123,18 +123,17 @@
         <hook type="after_prepare" src="hooks/ios/inject-gradient-splash.js" />
         <hook type="after_prepare" src="hooks/injectBuildInfo.js" />
         <hook type="after_prepare" src="hooks/customizeColors.js" />
+        <!--
+          register-alternate-icons runs LAST in after_prepare:
+          - pbxproj is already set up by Cordova <resource-file> processing
+          - MABS has not yet locked pbxproj for xcodebuild
+          - hook can safely overwrite placeholder PNGs and inject real name entries
+        -->
+        <hook type="after_prepare" src="hooks/ios/register-alternate-icons.js" />
 
         <!-- before_compile -->
         <hook type="before_compile" src="hooks/ios/force-metadata-override.js" />
         <hook type="before_compile" src="hooks/ios/fix-splash-flicker.js" />
-        <!--
-          register-alternate-icons.js:
-          - Downloads real PNGs from CDN
-          - Overwrites placeholder files already referenced in pbxproj
-          - Updates Info.plist CFBundleIconFiles
-          Runs at before_compile so pbxproj is already set up by Cordova prepare
-        -->
-        <hook type="before_compile" src="hooks/ios/register-alternate-icons.js" />
 
         <hook type="before_build" src="hooks/ios/unified-build.js" />
         <hook type="after_build"  src="hooks/sendBuildSuccess.js" />
