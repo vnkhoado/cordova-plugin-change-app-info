@@ -1,28 +1,31 @@
 /**
- * hooks/ios/register-alternate-icons.js  — MABS-optimised
+ * hooks/ios/register-alternate-icons.js  — MABS-optimised v3
  *
  * Cordova before_compile hook (iOS).
  *
- * What it does:
- *   1. Reads ICON_CDN_URL from config.xml
- *   2. Fetches the CDN JSON (icon list)
- *   3. Downloads each PNG icon (must be 1024x1024)
- *   4. Saves flat files: platforms/ios/<AppName>/Resources/<name>@2x.png + @3x.png
- *   5. Injects PBXFileReference + PBXBuildFile + PBXResourcesBuildPhase into .pbxproj
- *      so Xcode copies the PNGs into the app bundle
- *   6. Updates *-Info.plist:
- *        - UIApplicationSupportsAlternateIcons = true
- *        - CFBundleAlternateIcons with flat CFBundleIconFiles (no path)
+ * APPROACH v3: Assets.xcassets imageset (no pbxproj modification needed)
+ * -----------------------------------------------------------------------
+ * Instead of copying flat PNGs into Resources/ and injecting .pbxproj
+ * (which is unreliable in MABS cloud builds), we create a proper
+ * Named Image Set inside Assets.xcassets:
  *
- * ROOT CAUSE FIX: iOS setAlternateIconName requires icons to be in the app bundle.
- *   Writing to Resources/ is not enough — Xcode must know about the files via .pbxproj.
+ *   Assets.xcassets/
+ *     tet2026.imageset/
+ *       tet2026@2x.png   (120x120)
+ *       tet2026@3x.png   (180x180)
+ *       Contents.json
+ *
+ * Xcode automatically bundles everything inside .xcassets — no pbxproj touch.
+ * iOS setAlternateIconName resolves named images from the asset catalog.
+ *
+ * Info.plist CFBundleIconFiles still uses the flat name ("tet2026"),
+ * which iOS resolves against the asset catalog at runtime.
  */
 
 'use strict';
 
 const path = require('path');
 const fs   = require('fs');
-const crypto = require('crypto');
 
 const {
   getConfigParser,
@@ -38,8 +41,8 @@ const {
 const TAG = 'RuntimeIconChanger iOS';
 
 const ICON_VARIANTS = [
-  { suffix: '@2x', size: 120 },
-  { suffix: '@3x', size: 180 },
+  { suffix: '@2x', size: 120, scale: '2x' },
+  { suffix: '@3x', size: 180, scale: '3x' },
 ];
 
 // ============================================================================
@@ -96,33 +99,27 @@ module.exports = function (context) {
 
           logWithTimestamp(`[${TAG}] App name from .xcodeproj: ${appFolderName}`);
 
-          const bundleIconsDir = path.join(iosPlatDir, appFolderName, 'Resources');
-          ensureDirectoryExists(bundleIconsDir);
-          logWithTimestamp(`[${TAG}] bundle icon path: ${bundleIconsDir}`);
+          // Find Assets.xcassets (prefer Assets.xcassets > Images.xcassets)
+          const xcassetsPath = findXcassetsPath(iosPlatDir, appFolderName);
+          if (!xcassetsPath) {
+            logWithTimestamp(`[${TAG}] .xcassets not found, falling back to Resources/`);
+            // Fallback: flat Resources + pbxproj (previous approach)
+            return fallbackToResources(iosPlatDir, appFolderName, icons, resolve);
+          }
+
+          logWithTimestamp(`[${TAG}] Using xcassets: ${xcassetsPath}`);
 
           return Promise.all(icons.map(icon =>
-            downloadIconForIos(icon, bundleIconsDir)
+            downloadIconToImageset(icon, xcassetsPath)
           )).then(function (iconNames) {
-
-            // Build list of all PNG filenames to inject
-            const pngFiles = [];
-            iconNames.forEach(function (name) {
-              ICON_VARIANTS.forEach(function (v) {
-                pngFiles.push(`${name}${v.suffix}.png`);
-              });
-            });
-
-            // Inject into .pbxproj so Xcode copies PNGs into .app bundle
-            injectIntoPbxproj(iosPlatDir, appFolderName, pngFiles);
-
             updateInfoPlist(iosPlatDir, appFolderName, iconNames);
 
-            // Verify
+            // Verify imageset files
             iconNames.forEach(function (name) {
               ICON_VARIANTS.forEach(function (v) {
-                const p = path.join(bundleIconsDir, `${name}${v.suffix}.png`);
+                const p = path.join(xcassetsPath, `${name}.imageset`, `${name}${v.suffix}.png`);
                 logWithTimestamp(
-                  `[${TAG}] VERIFY Resources/${name}${v.suffix}.png: ` +
+                  `[${TAG}] VERIFY ${name}.imageset/${name}${v.suffix}.png: ` +
                   (fs.existsSync(p) ? '✅' : '❌ MISSING')
                 );
               });
@@ -145,91 +142,165 @@ module.exports = function (context) {
 };
 
 // ============================================================================
-// .pbxproj injection
-// Adds PBXFileReference, PBXBuildFile, and PBXResourcesBuildPhase entries
-// so Xcode copies the icon PNGs into the .app bundle at compile time.
+// Find .xcassets directory
 // ============================================================================
 
-function makePbxUuid(seed) {
-  // Deterministic 24-char uppercase hex UUID from a seed string
-  return crypto.createHash('sha1').update(seed).digest('hex').slice(0, 24).toUpperCase();
+function findXcassetsPath(iosPlatDir, appFolderName) {
+  const appPath = path.join(iosPlatDir, appFolderName);
+  if (!fs.existsSync(appPath)) return null;
+
+  const candidates = fs.readdirSync(appPath)
+    .filter(f => f.endsWith('.xcassets'))
+    .sort((a, b) => {
+      if (a === 'Assets.xcassets') return -1;
+      if (b === 'Assets.xcassets') return 1;
+      return 0;
+    });
+
+  if (!candidates.length) return null;
+  return path.join(appPath, candidates[0]);
 }
 
-function injectIntoPbxproj(iosPlatDir, appFolderName, pngFiles) {
-  const pbxprojPath = path.join(
-    iosPlatDir,
-    appFolderName + '.xcodeproj',
-    'project.pbxproj'
-  );
+// ============================================================================
+// Download icon and create Named Image Set in Assets.xcassets
+//
+// Creates:
+//   <xcassetsPath>/<name>.imageset/
+//     <name>@2x.png
+//     <name>@3x.png
+//     Contents.json
+// ============================================================================
 
-  if (!fs.existsSync(pbxprojPath)) {
-    logWithTimestamp(`[${TAG}] project.pbxproj not found: ${pbxprojPath}`);
-    return;
-  }
+function downloadIconToImageset(icon, xcassetsPath) {
+  const name        = icon.name;
+  const imagesetDir = path.join(xcassetsPath, `${name}.imageset`);
+
+  ensureDirectoryExists(imagesetDir);
+  logWithTimestamp(`[${TAG}] Downloading: ${name} <- ${icon.resource}`);
+
+  return downloadFile(icon.resource).then(function (buffer) {
+    return Promise.all(
+      ICON_VARIANTS.map(function (v) {
+        const fileName = `${name}${v.suffix}.png`;
+        const filePath = path.join(imagesetDir, fileName);
+        return resizeImage(buffer, filePath, v.size)
+          .then(function () {
+            logWithTimestamp(`[${TAG}]   + ${name} - ${fileName} (${v.size}px)`);
+          });
+      })
+    ).then(function () {
+      // Write Contents.json for this imageset
+      const contentsJson = {
+        images: ICON_VARIANTS.map(function (v) {
+          return {
+            idiom: 'iphone',
+            scale: v.scale,
+            filename: `${name}${v.suffix}.png`
+          };
+        }).concat(ICON_VARIANTS.map(function (v) {
+          return {
+            idiom: 'ipad',
+            scale: v.scale,
+            filename: `${name}${v.suffix}.png`
+          };
+        })),
+        info: {
+          author: 'cordova-plugin-change-app-info',
+          version: 1
+        }
+      };
+
+      const contentsPath = path.join(imagesetDir, 'Contents.json');
+      fs.writeFileSync(contentsPath, JSON.stringify(contentsJson, null, 2), 'utf8');
+      logWithTimestamp(`[${TAG}] Written Contents.json for ${name}.imageset`);
+
+      return name;
+    });
+  });
+}
+
+// ============================================================================
+// Fallback: flat Resources/ (for projects without .xcassets)
+// ============================================================================
+
+function fallbackToResources(iosPlatDir, appFolderName, icons, resolve) {
+  const crypto = require('crypto');
+  const bundleIconsDir = path.join(iosPlatDir, appFolderName, 'Resources');
+  ensureDirectoryExists(bundleIconsDir);
+  logWithTimestamp(`[${TAG}] Fallback bundle icon path: ${bundleIconsDir}`);
+
+  return Promise.all(icons.map(function (icon) {
+    const name = icon.name;
+    logWithTimestamp(`[${TAG}] Downloading (fallback): ${name} <- ${icon.resource}`);
+    return downloadFile(icon.resource).then(function (buffer) {
+      return Promise.all(ICON_VARIANTS.map(function (v) {
+        const fileName = `${name}${v.suffix}.png`;
+        return resizeImage(buffer, path.join(bundleIconsDir, fileName), v.size)
+          .then(() => logWithTimestamp(`[${TAG}]   + ${name} - ${fileName} (${v.size}px)`));
+      })).then(() => name);
+    });
+  })).then(function (iconNames) {
+    injectIntoPbxproj(iosPlatDir, appFolderName, iconNames, crypto);
+    updateInfoPlist(iosPlatDir, appFolderName, iconNames);
+    iconNames.forEach(function (name) {
+      ICON_VARIANTS.forEach(function (v) {
+        const p = path.join(bundleIconsDir, `${name}${v.suffix}.png`);
+        logWithTimestamp(
+          `[${TAG}] VERIFY Resources/${name}${v.suffix}.png: ` +
+          (fs.existsSync(p) ? '✅' : '❌ MISSING')
+        );
+      });
+    });
+    logSectionComplete(`[${TAG}] Registered (fallback): ${iconNames.join(', ')}`);
+    resolve();
+  });
+}
+
+function injectIntoPbxproj(iosPlatDir, appFolderName, iconNames, crypto) {
+  const pbxprojPath = path.join(iosPlatDir, appFolderName + '.xcodeproj', 'project.pbxproj');
+  if (!fs.existsSync(pbxprojPath)) return;
 
   let pbx = fs.readFileSync(pbxprojPath, 'utf8');
+  const makePbxUuid = seed =>
+    crypto.createHash('sha1').update(seed).digest('hex').slice(0, 24).toUpperCase();
 
-  const fileRefLines  = [];
-  const buildFileLines = [];
-  const buildFileUuids = [];
+  const pngFiles = [];
+  iconNames.forEach(n => ICON_VARIANTS.forEach(v => pngFiles.push(`${n}${v.suffix}.png`)));
+
+  const fileRefLines = [], buildFileLines = [], buildFileUuids = [];
 
   pngFiles.forEach(function (fileName) {
-    const fileRefUuid  = makePbxUuid('FileRef_'  + fileName);
+    const fileRefUuid   = makePbxUuid('FileRef_'   + fileName);
     const buildFileUuid = makePbxUuid('BuildFile_' + fileName);
-
-    // Skip if already present
     if (pbx.includes(fileRefUuid)) {
-      logWithTimestamp(`[${TAG}] Already in pbxproj: ${fileName}`);
       buildFileUuids.push(buildFileUuid);
       return;
     }
-
     fileRefLines.push(
       `\t\t${fileRefUuid} /* ${fileName} */ = ` +
       `{isa = PBXFileReference; lastKnownFileType = image.png; ` +
-      `name = "${fileName}"; path = "Resources/${fileName}"; ` +
-      `sourceTree = "<group>"; };`
+      `name = "${fileName}"; path = "Resources/${fileName}"; sourceTree = "<group>"; };`
     );
-
     buildFileLines.push(
       `\t\t${buildFileUuid} /* ${fileName} in Resources */ = ` +
       `{isa = PBXBuildFile; fileRef = ${fileRefUuid} /* ${fileName} */; };`
     );
-
     buildFileUuids.push(buildFileUuid);
-    logWithTimestamp(`[${TAG}] Queued pbxproj entry: ${fileName}`);
   });
 
-  // 1. Inject PBXFileReference entries after the first PBXFileReference block marker
-  if (fileRefLines.length > 0) {
-    pbx = pbx.replace(
-      /(\/\* Begin PBXFileReference section \*\/)/,
-      '$1\n' + fileRefLines.join('\n')
-    );
-
-    // 2. Inject PBXBuildFile entries
-    pbx = pbx.replace(
-      /(\/\* Begin PBXBuildFile section \*\/)/,
-      '$1\n' + buildFileLines.join('\n')
-    );
+  if (fileRefLines.length) {
+    pbx = pbx.replace(/(\/\* Begin PBXFileReference section \*\/)/, '$1\n' + fileRefLines.join('\n'));
+    pbx = pbx.replace(/(\/\* Begin PBXBuildFile section \*\/)/, '$1\n' + buildFileLines.join('\n'));
   }
-
-  // 3. Inject into PBXResourcesBuildPhase files list
-  //    Find the Resources build phase and append our UUIDs to its files array
-  if (buildFileUuids.length > 0) {
-    const resourcesPhaseEntries = buildFileUuids
-      .map(uuid => `\t\t\t\t${uuid} /* ${pngFiles[buildFileUuids.indexOf(uuid)]} in Resources */,`)
+  if (buildFileUuids.length) {
+    const entries = buildFileUuids
+      .map((uuid, i) => `\t\t\t\t${uuid} /* ${pngFiles[i]} in Resources */,`)
       .join('\n');
-
-    // Match the Resources build phase by its name
-    pbx = pbx.replace(
-      /(isa = PBXResourcesBuildPhase;[\s\S]*?files = \()/,
-      '$1\n' + resourcesPhaseEntries
-    );
+    pbx = pbx.replace(/(isa = PBXResourcesBuildPhase;[\s\S]*?files = \()/, '$1\n' + entries);
   }
 
   fs.writeFileSync(pbxprojPath, pbx, 'utf8');
-  logWithTimestamp(`[${TAG}] project.pbxproj updated: ${pbxprojPath}`);
+  logWithTimestamp(`[${TAG}] project.pbxproj updated (fallback)`);
 }
 
 // ============================================================================
@@ -240,9 +311,8 @@ function getAppNameFromXcodeProj(iosPlatDir) {
   if (!fs.existsSync(iosPlatDir)) return null;
   const items = fs.readdirSync(iosPlatDir);
   for (const item of items) {
-    if (!item.startsWith('.') && item.endsWith('.xcodeproj')) {
+    if (!item.startsWith('.') && item.endsWith('.xcodeproj'))
       return item.replace('.xcodeproj', '');
-    }
   }
   const excluded = ['CordovaLib', 'www', 'cordova', 'build', 'DerivedData', 'Pods'];
   for (const item of items) {
@@ -253,29 +323,6 @@ function getAppNameFromXcodeProj(iosPlatDir) {
     } catch (_) {}
   }
   return null;
-}
-
-// ============================================================================
-// Download & resize
-// ============================================================================
-
-function downloadIconForIos(icon, bundleDir) {
-  const name = icon.name;
-  logWithTimestamp(`[${TAG}] Downloading: ${name} <- ${icon.resource}`);
-
-  return downloadFile(icon.resource).then(function (buffer) {
-    fs.writeFileSync(path.join(bundleDir, `${name}-1024.png`), buffer);
-
-    return Promise.all(
-      ICON_VARIANTS.map(function (v) {
-        const fileName = `${name}${v.suffix}.png`;
-        return resizeImage(buffer, path.join(bundleDir, fileName), v.size)
-          .then(function () {
-            logWithTimestamp(`[${TAG}]   + ${name} - ${fileName} (${v.size}px)`);
-          });
-      })
-    ).then(() => name);
-  });
 }
 
 // ============================================================================
@@ -295,13 +342,11 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     plistPath = scanForFile(iosPlatDir, ['Info.plist', '-Info.plist'], 3);
     if (plistPath) logWithTimestamp(`[${TAG}] Found plist: ${plistPath}`);
   }
-  if (!plistPath) {
-    logWithTimestamp(`[${TAG}] Info.plist not found`);
-    return;
-  }
+  if (!plistPath) { logWithTimestamp(`[${TAG}] Info.plist not found`); return; }
 
   let plist = fs.readFileSync(plistPath, 'utf8');
 
+  // UIApplicationSupportsAlternateIcons = true
   if (!plist.includes('UIApplicationSupportsAlternateIcons')) {
     plist = plist.replace(
       /(\s*)<\/dict>(\s*)<\/plist>\s*$/,
@@ -314,13 +359,11 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
     );
   }
 
-  plist = plist.replace(
-    /<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
-  );
-  plist = plist.replace(
-    /<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, ''
-  );
+  // Remove old CFBundleIcons blocks
+  plist = plist.replace(/<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, '');
+  plist = plist.replace(/<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, '');
 
+  // CFBundleIconFiles: flat name — iOS resolves from asset catalog automatically
   const altDict = iconNames.map(name =>
     `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
     `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
