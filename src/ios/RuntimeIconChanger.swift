@@ -159,29 +159,29 @@ class RuntimeIconChanger: CDVPlugin {
         }
 
         let rootContents = (try? fm.contentsOfDirectory(atPath: bundlePath)) ?? []
-        lines.append("hasWww=\(rootContents.contains(\"www\"))")
-        lines.append("hasRuntimeIcons=\(rootContents.contains(\"RuntimeIcons\"))")
+        let hasWww = rootContents.contains("www")
+        let hasRuntimeIcons = rootContents.contains("RuntimeIcons")
+        lines.append("hasWww=\(hasWww)")
+        lines.append("hasRuntimeIcons=\(hasRuntimeIcons)")
 
         // CHECK 1: flat native bundle resources (cách đúng sau fix)
-        let nativeCheckPaths = [
-            "\(iconName)@2x.png",
-            "\(iconName)@3x.png",
-        ]
-        for p in nativeCheckPaths {
-            let exists = fm.fileExists(atPath: bundlePath + "/" + p)
-            lines.append("\(exists ? \"YES\" : \"NO\"):bundle/\(p)")
+        for suffix in ["@2x", "@3x"] {
+            let fileName = "\(iconName)\(suffix).png"
+            let exists = fm.fileExists(atPath: bundlePath + "/" + fileName)
+            lines.append("\(exists ? "YES" : "NO"):bundle/\(fileName)")
         }
 
         // CHECK 2: www/RuntimeIcons (cách cũ)
         let wwwPath = bundlePath + "/www"
         if fm.fileExists(atPath: wwwPath) {
             let wwwContents = (try? fm.contentsOfDirectory(atPath: wwwPath)) ?? []
-            lines.append("wwwHasRuntimeIcons=\(wwwContents.contains(\"RuntimeIcons\"))")
+            let wwwHasRIC = wwwContents.contains("RuntimeIcons")
+            lines.append("wwwHasRuntimeIcons=\(wwwHasRIC)")
 
             let ricPath = wwwPath + "/RuntimeIcons"
             if fm.fileExists(atPath: ricPath) {
                 let ricContents = (try? fm.contentsOfDirectory(atPath: ricPath)) ?? []
-                lines.append("www/RuntimeIcons/=\(ricContents.joined(separator: \",\"))")
+                lines.append("www/RuntimeIcons/=\(ricContents.joined(separator: ","))")
             } else {
                 lines.append("www/RuntimeIcons=NOT_FOUND")
             }
@@ -198,7 +198,7 @@ class RuntimeIconChanger: CDVPlugin {
         ]
         for p in legacyPaths {
             let exists = fm.fileExists(atPath: bundlePath + "/" + p)
-            lines.append("\(exists ? \"YES\" : \"NO\"):\(p)")
+            lines.append("\(exists ? "YES" : "NO"):\(p)")
         }
 
         return lines.joined(separator: " || ")
