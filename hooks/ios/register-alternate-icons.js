@@ -1,22 +1,27 @@
 /**
- * hooks/ios/register-alternate-icons.js  — MABS-optimised v5
+ * hooks/ios/register-alternate-icons.js  — MABS-optimised v6
  *
- * STRATEGY v5: Xcode Run Script Build Phase
- * -----------------------------------------
- * All previous approaches (xcassets imageset/appiconset, flat Resources/)
- * fail because MABS runs actool AFTER our hook, wiping our changes.
+ * STRATEGY v6: resource-file placeholders + overwrite
+ * ---------------------------------------------------
+ * plugin.xml declares <resource-file> for each alternate icon placeholder.
+ * Cordova prepare automatically:
+ *   1. Copies placeholder PNGs → platforms/ios/<App>/Resources/
+ *   2. Injects PBXFileReference + PBXBuildFile + PBXResourcesBuildPhase
+ *      into project.pbxproj
  *
- * Solution: inject a "Run Script" build phase into .pbxproj.
- * This shell script runs INSIDE xcodebuild, AFTER actool,
- * and copies icon PNGs directly into $BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH
- * (i.e. the .app bundle being assembled).
+ * This hook runs at before_compile and:
+ *   1. Reads ICON_CDN_URL from config.xml
+ *   2. Fetches icon list JSON from CDN
+ *   3. For each icon, downloads real PNG and OVERWRITES the placeholder
+ *      that Cordova already registered in pbxproj
+ *   4. Updates Info.plist with CFBundleIconFiles pointing to the real names
+ *   5. Also adds real-named resource-file entries to pbxproj if not present
+ *      (for icons whose name != placeholder)
  *
- * The script:
- *   1. Downloads icon PNGs from CDN using curl (available on MABS macOS)
- *   2. Resizes with sips (built-in macOS tool, no extra deps)
- *   3. Copies to $BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/
- *
- * Info.plist uses CFBundleIconFiles (flat name) — iOS finds flat PNGs in bundle root.
+ * KEY INSIGHT (from EddyVerbruggen/cordova-plugin-app-icon-changer):
+ *   - Icons must be in Resources/ AND referenced in pbxproj
+ *   - CFBundleIconFiles uses flat name without @2x/@3x — iOS resolves automatically
+ *   - Only 1 size needed; iOS scales down from largest
  */
 
 'use strict';
@@ -27,14 +32,21 @@ const crypto = require('crypto');
 
 const {
   getConfigParser,
+  ensureDirectoryExists,
+  safeWriteFile,
   downloadFile,
+  resizeImage,
   logWithTimestamp,
   logSection,
-  logSectionComplete,
-  safeWriteFile
+  logSectionComplete
 } = require('../utils');
 
 const TAG = 'RuntimeIconChanger iOS';
+
+const ICON_VARIANTS = [
+  { suffix: '@2x', size: 120 },
+  { suffix: '@3x', size: 180 },
+];
 
 // ============================================================================
 // Entry point
@@ -90,14 +102,29 @@ module.exports = function (context) {
 
           logWithTimestamp(`[${TAG}] App name: ${appFolderName}`);
 
-          // 1. Inject Run Script phase into pbxproj
-          injectRunScriptPhase(iosPlatDir, appFolderName, icons);
+          const resourcesDir = path.join(iosPlatDir, appFolderName, 'Resources');
+          ensureDirectoryExists(resourcesDir);
+          logWithTimestamp(`[${TAG}] Resources dir: ${resourcesDir}`);
 
-          // 2. Update Info.plist with CFBundleIconFiles (flat PNG name)
-          updateInfoPlist(iosPlatDir, appFolderName, icons.map(i => i.name));
+          return Promise.all(icons.map(icon =>
+            downloadAndPlaceIcon(icon, resourcesDir, iosPlatDir, appFolderName)
+          )).then(function (iconNames) {
+            updateInfoPlist(iosPlatDir, appFolderName, iconNames);
 
-          logSectionComplete(`[${TAG}] Run Script injected for: ${icons.map(i => i.name).join(', ')}`);
-          resolve();
+            // Verify
+            iconNames.forEach(function (name) {
+              ICON_VARIANTS.forEach(function (v) {
+                const p = path.join(resourcesDir, `${name}${v.suffix}.png`);
+                logWithTimestamp(
+                  `[${TAG}] VERIFY ${name}${v.suffix}.png: ` +
+                  (fs.existsSync(p) ? '✅ (' + fs.statSync(p).size + ' bytes)' : '❌ MISSING')
+                );
+              });
+            });
+
+            logSectionComplete(`[${TAG}] Registered: ${iconNames.join(', ')}`);
+            resolve();
+          });
         })
         .catch(function (err) {
           logWithTimestamp(`[${TAG}] Hook error (non-fatal): ${err.message}`);
@@ -112,117 +139,107 @@ module.exports = function (context) {
 };
 
 // ============================================================================
-// Build the shell script that runs inside Xcode build
-// Uses only curl + sips (both available on macOS, no npm deps needed)
+// Download icon PNG and place in Resources/
+// Also injects pbxproj if entry not already there
 // ============================================================================
 
-function buildShellScript(icons) {
-  const lines = [
-    '#!/bin/bash',
-    'set -e',
-    'DEST="$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH"',
-    'TMP=$(mktemp -d)',
-    'echo "[AltIcon] Bundle dest: $DEST"',
-    'echo "[AltIcon] Tmp dir: $TMP"',
-    '',
-  ];
+function downloadAndPlaceIcon(icon, resourcesDir, iosPlatDir, appFolderName) {
+  const name = icon.name;
+  logWithTimestamp(`[${TAG}] Downloading: ${name} <- ${icon.resource}`);
 
-  icons.forEach(function (icon) {
-    const name = icon.name;
-    const url  = icon.resource;
-    lines.push(`# --- ${name} ---`);
-    lines.push(`echo "[AltIcon] Downloading ${name}"`);
-    lines.push(`curl -fsSL "${url}" -o "$TMP/${name}-src.png"`);
-    // sips resize: 120x120 (@2x) and 180x180 (@3x)
-    lines.push(`sips -z 120 120 "$TMP/${name}-src.png" --out "$DEST/${name}@2x.png"`);
-    lines.push(`sips -z 180 180 "$TMP/${name}-src.png" --out "$DEST/${name}@3x.png"`);
-    lines.push(`echo "[AltIcon] Copied ${name}@2x.png and ${name}@3x.png to bundle"`);
-    lines.push('');
+  return downloadFile(icon.resource).then(function (buffer) {
+    return Promise.all(
+      ICON_VARIANTS.map(function (v) {
+        const fileName = `${name}${v.suffix}.png`;
+        const filePath = path.join(resourcesDir, fileName);
+        return resizeImage(buffer, filePath, v.size)
+          .then(function () {
+            const size = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+            logWithTimestamp(`[${TAG}]   + ${fileName} (${v.size}px, ${size} bytes)`);
+          });
+      })
+    ).then(function () {
+      // Inject pbxproj entry for this icon name (Cordova only added placeholder)
+      injectPbxprojIfNeeded(iosPlatDir, appFolderName, name);
+      return name;
+    });
   });
-
-  lines.push('rm -rf "$TMP"');
-  lines.push('echo "[AltIcon] Done"');
-
-  return lines.join('\n');
 }
 
 // ============================================================================
-// Inject PBXShellScriptBuildPhase into .pbxproj
+// Inject pbxproj entries for <name>@2x.png / <name>@3x.png
+// Safe to call multiple times — checks UUID before inserting
 // ============================================================================
 
-function injectRunScriptPhase(iosPlatDir, appFolderName, icons) {
+function makePbxUuid(seed) {
+  return crypto.createHash('sha1').update(seed).digest('hex').slice(0, 24).toUpperCase();
+}
+
+function injectPbxprojIfNeeded(iosPlatDir, appFolderName, iconName) {
   const pbxprojPath = path.join(
     iosPlatDir,
     `${appFolderName}.xcodeproj`,
     'project.pbxproj'
   );
-
-  if (!fs.existsSync(pbxprojPath)) {
-    logWithTimestamp(`[${TAG}] project.pbxproj not found: ${pbxprojPath}`);
-    return;
-  }
+  if (!fs.existsSync(pbxprojPath)) return;
 
   let pbx = fs.readFileSync(pbxprojPath, 'utf8');
 
-  // Deterministic UUID so we don't double-inject
-  const scriptUuid = makePbxUuid('AltIconRunScript_v5');
+  const fileRefLines   = [];
+  const buildFileLines = [];
+  const buildFileUuids = [];
 
-  if (pbx.includes(scriptUuid)) {
-    logWithTimestamp(`[${TAG}] Run Script already injected, skipping`);
-    return;
-  }
+  ICON_VARIANTS.forEach(function (v) {
+    const fileName     = `${iconName}${v.suffix}.png`;
+    const fileRefUuid  = makePbxUuid('FileRef_'   + fileName);
+    const buildUuid    = makePbxUuid('BuildFile_' + fileName);
 
-  const shellScript = buildShellScript(icons);
-  // Escape for pbxproj string: backslash, quote, newline
-  const escapedScript = shellScript
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n');
+    if (pbx.includes(fileRefUuid)) {
+      logWithTimestamp(`[${TAG}] pbxproj: already has ${fileName}`);
+      buildFileUuids.push({ uuid: buildUuid, fileName });
+      return;
+    }
 
-  // PBXShellScriptBuildPhase entry
-  const scriptPhaseEntry =
-    `\t\t${scriptUuid} /* Copy Alt Icons */ = {\n` +
-    `\t\t\tisa = PBXShellScriptBuildPhase;\n` +
-    `\t\t\tbuildActionMask = 2147483647;\n` +
-    `\t\t\tfiles = (\n\t\t\t);\n` +
-    `\t\t\tinputFileListPaths = (\n\t\t\t);\n` +
-    `\t\t\tinputPaths = (\n\t\t\t);\n` +
-    `\t\t\tname = "Copy Alt Icons";\n` +
-    `\t\t\toutputFileListPaths = (\n\t\t\t);\n` +
-    `\t\t\toutputPaths = (\n\t\t\t);\n` +
-    `\t\t\trunOnlyForDeploymentPostprocessing = 0;\n` +
-    `\t\t\tshellPath = /bin/bash;\n` +
-    `\t\t\tshellScript = "${escapedScript}";\n` +
-    `\t\t\tshowEnvVarsInLog = 0;\n` +
-    `\t\t};\n`;
-
-  // 1. Inject into PBXShellScriptBuildPhase section
-  if (pbx.includes('/* Begin PBXShellScriptBuildPhase section */')) {
-    pbx = pbx.replace(
-      /(\/\* Begin PBXShellScriptBuildPhase section \*\/)/,
-      `$1\n${scriptPhaseEntry}`
+    fileRefLines.push(
+      `\t\t${fileRefUuid} /* ${fileName} */ = ` +
+      `{isa = PBXFileReference; lastKnownFileType = image.png; ` +
+      `name = "${fileName}"; path = "Resources/${fileName}"; sourceTree = "<group>"; };`
     );
+    buildFileLines.push(
+      `\t\t${buildUuid} /* ${fileName} in Resources */ = ` +
+      `{isa = PBXBuildFile; fileRef = ${fileRefUuid} /* ${fileName} */; };`
+    );
+    buildFileUuids.push({ uuid: buildUuid, fileName });
+    logWithTimestamp(`[${TAG}] pbxproj: queued ${fileName}`);
+  });
+
+  if (fileRefLines.length > 0) {
+    pbx = pbx.replace(
+      /(\/\* Begin PBXFileReference section \*\/)/,
+      '$1\n' + fileRefLines.join('\n')
+    );
+    pbx = pbx.replace(
+      /(\/\* Begin PBXBuildFile section \*\/)/,
+      '$1\n' + buildFileLines.join('\n')
+    );
+
+    const phaseEntries = buildFileUuids
+      .map(e => `\t\t\t\t${e.uuid} /* ${e.fileName} in Resources */,`)
+      .join('\n');
+    pbx = pbx.replace(
+      /(isa = PBXResourcesBuildPhase;[\s\S]*?files = \()/,
+      '$1\n' + phaseEntries
+    );
+
+    fs.writeFileSync(pbxprojPath, pbx, 'utf8');
+    logWithTimestamp(`[${TAG}] pbxproj: updated for ${iconName}`);
   } else {
-    // No shell script section yet — add one before PBXSourcesBuildPhase
-    pbx = pbx.replace(
-      /(\/\* Begin PBXSourcesBuildPhase section \*\/)/,
-      `/* Begin PBXShellScriptBuildPhase section */\n${scriptPhaseEntry}/* End PBXShellScriptBuildPhase section */\n\n$1`
-    );
+    logWithTimestamp(`[${TAG}] pbxproj: no changes needed for ${iconName}`);
   }
-
-  // 2. Add the UUID reference to the target's buildPhases array
-  //    Find the main target's buildPhases list and append our UUID
-  pbx = pbx.replace(
-    /(buildPhases = \([\s\S]*?)(\);)/,
-    `$1\t\t\t\t${scriptUuid} /* Copy Alt Icons */,\n\t\t\t$2`
-  );
-
-  fs.writeFileSync(pbxprojPath, pbx, 'utf8');
-  logWithTimestamp(`[${TAG}] Run Script phase injected into: ${pbxprojPath}`);
 }
 
 // ============================================================================
-// Info.plist — CFBundleIconFiles (flat PNG, no extension)
+// Info.plist — CFBundleIconFiles (flat name, iOS resolves @2x/@3x)
 // ============================================================================
 
 function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
@@ -258,7 +275,7 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
   plist = plist.replace(/<key>CFBundleIcons<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, '');
   plist = plist.replace(/<key>CFBundleIcons~ipad<\/key>[\s\S]*?<\/dict>\s*(?=<key>|<\/dict>\s*<\/plist>)/g, '');
 
-  // CFBundleIconFiles: flat name — iOS finds <name>@2x.png / <name>@3x.png in bundle root
+  // CFBundleIconFiles: flat name — iOS resolves @2x/@3x automatically from bundle root
   const altDict = iconNames.map(name =>
     `\t\t\t<key>${name}</key>\n\t\t\t<dict>\n` +
     `\t\t\t\t<key>CFBundleIconFiles</key>\n` +
@@ -289,10 +306,6 @@ function updateInfoPlist(iosPlatDir, appFolderName, iconNames) {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-function makePbxUuid(seed) {
-  return crypto.createHash('sha1').update(seed).digest('hex').slice(0, 24).toUpperCase();
-}
 
 function getAppNameFromXcodeProj(iosPlatDir) {
   if (!fs.existsSync(iosPlatDir)) return null;
